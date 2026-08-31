@@ -48,6 +48,9 @@ func TestRecorderPersistsSessionEventsAndUsage(t *testing.T) {
 	if detail.SessionSource != "explicit" {
 		t.Fatalf("session source = %q", detail.SessionSource)
 	}
+	if detail.Incomplete || detail.FilePath == "" || detail.Bytes <= 0 {
+		t.Fatalf("session aggregate = incomplete:%v file:%q bytes:%d, want complete indexed session", detail.Incomplete, detail.FilePath, detail.Bytes)
+	}
 	if len(detail.Events) < 5 {
 		t.Fatalf("events = %d, want at least 5", len(detail.Events))
 	}
@@ -349,6 +352,46 @@ func TestRecorderPersistsEventsAcrossRestart(t *testing.T) {
 	}
 	if len(detail.Events) != 1 || detail.Events[0].Kind != "request.input" {
 		t.Fatalf("persisted events = %#v", detail.Events)
+	}
+	_ = restarted.Close()
+}
+
+func TestRecorderRepairsAggregateRowsOnRestart(t *testing.T) {
+	root := t.TempDir()
+	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: root})
+	if errNew != nil {
+		t.Fatal(errNew)
+	}
+	req, _ := http.NewRequest(http.MethodPost, "http://example.test/v1/chat/completions", nil)
+	state := NewState(recorder, req, nil)
+	if errAppend := state.append("request.input", map[string]any{"body": map[string]any{"model": "repair-test"}}); errAppend != nil {
+		t.Fatal(errAppend)
+	}
+	waitForEvents(t, recorder, state.sessionID, 1)
+	if _, errCorrupt := recorder.db.Exec("UPDATE sessions SET incomplete = 999, file_path = '0' WHERE session_id = ?", state.sessionID); errCorrupt != nil {
+		t.Fatal(errCorrupt)
+	}
+	if _, errCorrupt := recorder.db.Exec("UPDATE turns SET incomplete = 999 WHERE turn_id = ?", state.turnID); errCorrupt != nil {
+		t.Fatal(errCorrupt)
+	}
+	if errClose := recorder.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+
+	restarted, errRestart := NewRecorder(Config{Enabled: true, RootDir: root})
+	if errRestart != nil {
+		t.Fatal(errRestart)
+	}
+	detail, errGet := restarted.GetSession(state.sessionID)
+	if errGet != nil {
+		t.Fatal(errGet)
+	}
+	if detail.Incomplete || detail.FilePath == "" || detail.FilePath == "0" {
+		t.Fatalf("restarted aggregate = incomplete:%v file:%q, want rebuilt values", detail.Incomplete, detail.FilePath)
+	}
+	turns, errTurns := restarted.ListTurns(Filter{Model: "repair-test"}, 10, 0)
+	if errTurns != nil || len(turns) != 1 || turns[0].Incomplete {
+		t.Fatalf("restarted turn aggregate = err:%v turns:%#v", errTurns, turns)
 	}
 	_ = restarted.Close()
 }

@@ -184,6 +184,10 @@ func NewRecorder(cfg Config) (*Recorder, error) {
 		cleanupDone:        make(chan struct{}),
 		files:              make(map[string]*traceFile),
 	}
+	if errRebuild := r.rebuildAggregates(); errRebuild != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("rebuild trace index: %w", errRebuild)
+	}
 	go r.run()
 	go r.cleanupLoop()
 	return r, nil
@@ -388,7 +392,7 @@ func (r *Recorder) indexEvent(event Event, relativeFile string, offset, size int
 	now := event.Timestamp.UTC().Format(time.RFC3339Nano)
 	if _, err := tx.Exec(`INSERT INTO sessions(session_id,first_at,last_at,session_source,event_count,bytes,incomplete,file_path)
 		VALUES(?,?,?,?,1,?,?,?) ON CONFLICT(session_id) DO UPDATE SET last_at=excluded.last_at,event_count=sessions.event_count+1,bytes=sessions.bytes+excluded.bytes,incomplete=MAX(sessions.incomplete,excluded.incomplete),file_path=excluded.file_path`,
-		event.SessionID, now, now, event.SessionSource, size, size, boolInt(event.Incomplete), relativeFile); err != nil {
+		event.SessionID, now, now, event.SessionSource, size, boolInt(event.Incomplete), relativeFile); err != nil {
 		return rollback(err)
 	}
 	if _, err := tx.Exec(`INSERT INTO turns(turn_id,session_id,request_id,trace_id,started_at,last_at,incomplete)
@@ -603,7 +607,12 @@ func (r *Recorder) rebuildAggregates() error {
 		first_at = COALESCE((SELECT MIN(timestamp) FROM events WHERE events.session_id = sessions.session_id), first_at),
 		last_at = COALESCE((SELECT MAX(timestamp) FROM events WHERE events.session_id = sessions.session_id), last_at),
 		turn_count = (SELECT COUNT(DISTINCT turn_id) FROM events WHERE events.session_id = sessions.session_id),
+		incomplete = COALESCE((SELECT MAX(incomplete) FROM events WHERE events.session_id = sessions.session_id), 0),
 		file_path = COALESCE((SELECT file_path FROM events WHERE events.session_id = sessions.session_id ORDER BY timestamp DESC, sequence DESC LIMIT 1), file_path)`); err != nil {
+		return err
+	}
+	if _, err := r.db.Exec(`UPDATE turns SET
+		incomplete = COALESCE((SELECT MAX(incomplete) FROM events WHERE events.turn_id = turns.turn_id), 0)`); err != nil {
 		return err
 	}
 	if _, err := r.db.Exec("DELETE FROM turns WHERE turn_id NOT IN (SELECT DISTINCT turn_id FROM events)"); err != nil {
