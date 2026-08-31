@@ -87,6 +87,34 @@ func TestRecorderRotatesTraceFiles(t *testing.T) {
 	}
 }
 
+func TestRecorderUsesAsiaShanghaiDateBoundary(t *testing.T) {
+	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir()})
+	if errNew != nil {
+		t.Fatal(errNew)
+	}
+	// 16:30 UTC is already the next calendar day in Asia/Shanghai.
+	eventTime := time.Date(2026, time.August, 30, 16, 30, 0, 0, time.UTC)
+	if errAppend := recorder.Append(Event{
+		SchemaVersion: 1,
+		EventID:       "timezone-boundary",
+		Timestamp:     eventTime,
+		SessionID:     "timezone-boundary",
+		SessionSource: "single-request",
+		TurnID:        "timezone-turn",
+		Kind:          "request.input",
+	}); errAppend != nil {
+		t.Fatal(errAppend)
+	}
+	waitForEvents(t, recorder, "timezone-boundary", 1)
+	if errClose := recorder.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	files, errGlob := filepath.Glob(filepath.Join(recorder.RootDir(), "2026-08-31", "*.ndjson"))
+	if errGlob != nil || len(files) != 1 {
+		t.Fatalf("trace files = %v, err=%v; want one file under 2026-08-31", files, errGlob)
+	}
+}
+
 func contextWithState(state *State) context.Context {
 	return context.WithValue(context.Background(), ContextKey, state)
 }
@@ -310,6 +338,55 @@ func TestStandardSemanticObjectEventsAreRecorded(t *testing.T) {
 	}
 	if !reasoning || !toolCall || !toolResult {
 		t.Fatalf("standard semantic events missing: reasoning=%v tool_call=%v tool_result=%v", reasoning, toolCall, toolResult)
+	}
+	_ = recorder.Close()
+}
+
+func TestStreamingSemanticEventsAreRecordedFromSSE(t *testing.T) {
+	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir()})
+	if errNew != nil {
+		t.Fatal(errNew)
+	}
+	req, _ := http.NewRequest(http.MethodPost, "http://example.test/v1/messages", nil)
+	state := NewState(recorder, req, []byte(`{"model":"stream-model","messages":[{"role":"user","content":"inspect"}]}`))
+	if errBegin := state.Begin(); errBegin != nil {
+		t.Fatal(errBegin)
+	}
+	// This combines Anthropic content blocks and OpenAI-compatible delta fields
+	// in the same SSE payload shape used by the protocol handlers.
+	stream := strings.Join([]string{
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"reason"}}`,
+		``,
+		`data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"call-1","name":"search"}}`,
+		``,
+		`data: {"choices":[{"delta":{"reasoning_content":"more","tool_calls":[{"id":"call-1","function":{"name":"search","arguments":"{}"}}]}}]}`,
+		``,
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"tool_result":{"tool_call_id":"call-1","content":"done"}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	state.AppendDownstreamChunk([]byte(stream))
+	state.Finish(http.StatusOK, http.Header{"Content-Type": {"text/event-stream"}})
+	waitForEvents(t, recorder, state.sessionID, 7)
+	detail, errGet := recorder.GetSession(state.sessionID)
+	if errGet != nil {
+		t.Fatal(errGet)
+	}
+	var reasoning, toolCall, toolResult bool
+	for _, event := range detail.Events {
+		switch event.Kind {
+		case "reasoning":
+			reasoning = true
+		case "tool.call":
+			toolCall = true
+		case "tool.result":
+			toolResult = true
+		}
+	}
+	if !reasoning || !toolCall || !toolResult {
+		t.Fatalf("stream semantic events missing: reasoning=%v tool_call=%v tool_result=%v", reasoning, toolCall, toolResult)
 	}
 	_ = recorder.Close()
 }

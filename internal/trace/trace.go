@@ -573,16 +573,14 @@ func emitSemanticEvents(state *State, body []byte) {
 	emit = func(value any) {
 		switch node := value.(type) {
 		case map[string]any:
-			kind, field, payload, objectEvent := semanticEventForObject(node)
-			if objectEvent {
-				_ = state.append(kind, map[string]any{"field": field, "value": payload})
+			semanticEvents, objectKinds := semanticEventsForObject(node)
+			for _, semanticEvent := range semanticEvents {
+				_ = state.append(semanticEvent.kind, map[string]any{"field": semanticEvent.field, "value": semanticEvent.payload})
 			}
 			for key, child := range node {
 				lower := strings.ToLower(strings.TrimSpace(key))
-				if !objectEvent {
-					if kind := semanticFieldKind(lower); kind != "" {
-						_ = state.append(kind, map[string]any{"field": key, "value": child})
-					}
+				if kind := semanticFieldKind(lower); kind != "" && !objectKinds[kind] {
+					_ = state.append(kind, map[string]any{"field": key, "value": child})
 				}
 				emit(child)
 			}
@@ -608,27 +606,40 @@ func emitSemanticEvents(state *State, body []byte) {
 	}
 }
 
-func semanticEventForObject(node map[string]any) (kind, field string, payload any, ok bool) {
+type semanticEvent struct {
+	kind    string
+	field   string
+	payload any
+}
+
+// semanticEventsForObject returns every semantic event represented by an
+// object. A single streaming delta can carry reasoning and tool-call fields
+// together, so this intentionally does not stop after the first match.
+func semanticEventsForObject(node map[string]any) ([]semanticEvent, map[string]bool) {
 	if node == nil {
-		return "", "", nil, false
+		return nil, nil
+	}
+	events := make([]semanticEvent, 0, 2)
+	objectKinds := make(map[string]bool)
+	for key, value := range node {
+		lower := strings.ToLower(strings.TrimSpace(key))
+		if lower != "type" {
+			continue
+		}
+		if kind := semanticTypeKind(value); kind != "" {
+			events = append(events, semanticEvent{kind: kind, field: key, payload: node})
+			objectKinds[kind] = true
+		}
 	}
 	for key, value := range node {
 		lower := strings.ToLower(strings.TrimSpace(key))
-		if lower == "type" {
-			if kind = semanticTypeKind(value); kind != "" {
-				return kind, key, node, true
-			}
+		if lower != "role" || !strings.EqualFold(strings.TrimSpace(stringValue(value)), "tool") {
+			continue
 		}
-		if lower == "role" && strings.EqualFold(strings.TrimSpace(stringValue(value)), "tool") {
-			return "tool.result", key, node, true
-		}
+		events = append(events, semanticEvent{kind: "tool.result", field: key, payload: node})
+		objectKinds["tool.result"] = true
 	}
-	for key, value := range node {
-		if kind = semanticFieldKind(strings.ToLower(strings.TrimSpace(key))); kind != "" {
-			return kind, key, value, true
-		}
-	}
-	return "", "", nil, false
+	return events, objectKinds
 }
 
 func semanticFieldKind(field string) string {
@@ -646,11 +657,11 @@ func semanticFieldKind(field string) string {
 
 func semanticTypeKind(value any) string {
 	switch strings.ToLower(strings.TrimSpace(stringValue(value))) {
-	case "reasoning", "thinking", "thought":
+	case "reasoning", "thinking", "thought", "thinking_delta", "reasoning_content", "reasoning_content_delta":
 		return "reasoning"
-	case "tool_use", "tool_call", "function_call", "custom_tool_call":
+	case "tool_use", "tool_call", "function_call", "custom_tool_call", "input_json_delta":
 		return "tool.call"
-	case "tool_result", "function_call_output", "function_response", "tool_response":
+	case "tool_result", "function_call_output", "function_response", "tool_response", "custom_tool_call_output":
 		return "tool.result"
 	default:
 		return ""

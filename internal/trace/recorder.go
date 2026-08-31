@@ -25,6 +25,11 @@ const (
 	queueSize                  = 2048
 )
 
+// Trace files are partitioned by the operator-facing local date. The service
+// is deployed in Asia/Shanghai, but keeping the location explicit prevents a
+// host or container timezone change from silently moving events between days.
+var traceLocation = time.FixedZone("Asia/Shanghai", 8*60*60)
+
 // Config controls recorder storage and cleanup.
 type Config struct {
 	Enabled            bool
@@ -264,9 +269,9 @@ func (r *Recorder) writeEvent(event Event) error {
 var ioErrShortWrite = errors.New("short trace write")
 
 func (r *Recorder) fileForLocked(event Event) (*traceFile, error) {
-	date := event.Timestamp.In(time.Local).Format("2006-01-02")
+	date := event.Timestamp.In(traceLocation).Format("2006-01-02")
 	if date == "0001-01-01" {
-		date = time.Now().In(time.Local).Format("2006-01-02")
+		date = time.Now().In(traceLocation).Format("2006-01-02")
 	}
 	hash := sessionHash(event.SessionID)
 	key := date + ":" + hash
