@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -112,6 +113,44 @@ func TestRecorderUsesAsiaShanghaiDateBoundary(t *testing.T) {
 	files, errGlob := filepath.Glob(filepath.Join(recorder.RootDir(), "2026-08-31", "*.ndjson"))
 	if errGlob != nil || len(files) != 1 {
 		t.Fatalf("trace files = %v, err=%v; want one file under 2026-08-31", files, errGlob)
+	}
+}
+
+func TestRecorderReportsWriteFailureToCallerAndHealth(t *testing.T) {
+	root := t.TempDir()
+	eventTime := time.Date(2026, time.August, 31, 1, 0, 0, 0, time.UTC)
+	datePath := filepath.Join(root, eventTime.In(traceLocation).Format("2006-01-02"))
+	if errWrite := os.WriteFile(datePath, []byte("directory placeholder"), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: root})
+	if errNew != nil {
+		t.Fatal(errNew)
+	}
+	errAppend := recorder.Append(Event{
+		SchemaVersion: 1,
+		EventID:       "write-failure",
+		Timestamp:     eventTime,
+		SessionID:     "write-failure",
+		SessionSource: "single-request",
+		TurnID:        "write-failure-turn",
+		Kind:          "request.input",
+	})
+	if errAppend == nil {
+		t.Fatal("Append should report a trace write failure")
+	}
+	stats, errStats := recorder.Stats()
+	if errStats != nil {
+		t.Fatal(errStats)
+	}
+	if got, _ := stats["write_errors"].(int64); got == 0 {
+		t.Fatalf("health stats did not record write error: %#v", stats)
+	}
+	if _, ok := stats["last_write_error"].(string); !ok {
+		t.Fatalf("health stats missing last_write_error: %#v", stats)
+	}
+	if errClose := recorder.Close(); errClose != nil {
+		t.Fatal(errClose)
 	}
 }
 

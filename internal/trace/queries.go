@@ -261,7 +261,12 @@ func (r *Recorder) Stats() (map[string]any, error) {
 	if err := r.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&events); err != nil {
 		return nil, err
 	}
-	return map[string]any{
+	r.errorMu.RLock()
+	lastError := r.lastError
+	lastErrorAt := r.lastErrorAt
+	writeErrors := r.writeErrors
+	r.errorMu.RUnlock()
+	stats := map[string]any{
 		"enabled":        true,
 		"root_dir":       r.rootDir,
 		"sessions":       sessions,
@@ -270,7 +275,13 @@ func (r *Recorder) Stats() (map[string]any, error) {
 		"retention_days": r.retentionDays,
 		"metadata_days":  r.metadataDays,
 		"max_bytes":      r.maxBytes,
-	}, nil
+		"write_errors":   writeErrors,
+	}
+	if lastError != "" {
+		stats["last_write_error"] = lastError
+		stats["last_write_error_at"] = lastErrorAt
+	}
+	return stats, nil
 }
 
 func (r *Recorder) updateTurnFromEvent(tx *sql.Tx, event Event) error {

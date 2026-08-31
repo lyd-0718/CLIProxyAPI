@@ -51,7 +51,7 @@ type Recorder struct {
 	maxBytes           int64
 	recordStreamChunks bool
 
-	queue       chan Event
+	queue       chan queuedEvent
 	stop        chan struct{}
 	done        chan struct{}
 	cleanupDone chan struct{}
@@ -59,6 +59,10 @@ type Recorder struct {
 	queueMu     sync.RWMutex
 	filesMu     sync.Mutex
 	files       map[string]*traceFile
+	errorMu     sync.RWMutex
+	lastError   string
+	lastErrorAt time.Time
+	writeErrors int64
 }
 
 type traceFile struct {
@@ -70,6 +74,11 @@ type traceFile struct {
 	path      string
 	bytes     int64
 	file      *os.File
+}
+
+type queuedEvent struct {
+	event Event
+	done  chan error
 }
 
 // NewRecorder creates a recorder rooted at a durable directory.
@@ -169,7 +178,7 @@ func NewRecorder(cfg Config) (*Recorder, error) {
 		metadataDays:       cfg.MetadataDays,
 		maxBytes:           cfg.MaxBytes,
 		recordStreamChunks: cfg.RecordStreamChunks,
-		queue:              make(chan Event, queueSize),
+		queue:              make(chan queuedEvent, queueSize),
 		stop:               make(chan struct{}),
 		done:               make(chan struct{}),
 		cleanupDone:        make(chan struct{}),
@@ -183,8 +192,10 @@ func NewRecorder(cfg Config) (*Recorder, error) {
 // Enabled reports whether this recorder is active.
 func (r *Recorder) Enabled() bool { return r != nil && r.db != nil }
 
-// Append queues one event. It intentionally applies backpressure when the
-// bounded writer queue is full so trace chunks are not silently dropped.
+// Append queues one event and waits until the writer has persisted it. It
+// intentionally applies backpressure when the bounded writer queue is full so
+// trace chunks are not silently dropped and write failures can mark the Turn
+// incomplete before the API request finishes.
 func (r *Recorder) Append(event Event) error {
 	if !r.Enabled() {
 		return nil
@@ -192,11 +203,17 @@ func (r *Recorder) Append(event Event) error {
 	if strings.TrimSpace(event.EventID) == "" {
 		event.EventID = fmt.Sprintf("event-%d", time.Now().UnixNano())
 	}
+	item := queuedEvent{event: event, done: make(chan error, 1)}
 	r.queueMu.RLock()
 	defer r.queueMu.RUnlock()
 	select {
-	case r.queue <- event:
-		return nil
+	case <-r.stop:
+		return errors.New("trace recorder is closed")
+	default:
+	}
+	select {
+	case r.queue <- item:
+		return <-item.done
 	case <-r.stop:
 		return errors.New("trace recorder is closed")
 	}
@@ -204,11 +221,26 @@ func (r *Recorder) Append(event Event) error {
 
 func (r *Recorder) run() {
 	defer close(r.done)
-	for event := range r.queue {
-		if errWrite := r.writeEvent(event); errWrite != nil {
+	for item := range r.queue {
+		errWrite := r.writeEvent(item.event)
+		if errWrite != nil {
+			r.recordWriteError(errWrite)
 			log.WithError(errWrite).Warn("trace: failed to persist event")
 		}
+		item.done <- errWrite
+		close(item.done)
 	}
+}
+
+func (r *Recorder) recordWriteError(err error) {
+	if r == nil || err == nil {
+		return
+	}
+	r.errorMu.Lock()
+	r.lastError = err.Error()
+	r.lastErrorAt = time.Now().UTC()
+	r.writeErrors++
+	r.errorMu.Unlock()
 }
 
 func (r *Recorder) cleanupLoop() {
