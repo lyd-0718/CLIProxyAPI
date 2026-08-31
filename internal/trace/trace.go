@@ -569,31 +569,32 @@ func emitSemanticEvents(state *State, body []byte) {
 	if state == nil || len(body) == 0 {
 		return
 	}
-	var emit func(any, string)
-	emit = func(value any, parent string) {
+	var emit func(any)
+	emit = func(value any) {
 		switch node := value.(type) {
 		case map[string]any:
+			kind, field, payload, objectEvent := semanticEventForObject(node)
+			if objectEvent {
+				_ = state.append(kind, map[string]any{"field": field, "value": payload})
+			}
 			for key, child := range node {
 				lower := strings.ToLower(strings.TrimSpace(key))
-				switch lower {
-				case "reasoning_content", "reasoning", "thinking", "thought", "thoughtsignature":
-					_ = state.append("reasoning", map[string]any{"field": key, "value": child})
-				case "tool_calls", "tool_use", "tool_call":
-					_ = state.append("tool.call", map[string]any{"field": key, "value": child})
-				case "tool_result", "tool_results":
-					_ = state.append("tool.result", map[string]any{"field": key, "value": child})
+				if !objectEvent {
+					if kind := semanticFieldKind(lower); kind != "" {
+						_ = state.append(kind, map[string]any{"field": key, "value": child})
+					}
 				}
-				emit(child, key)
+				emit(child)
 			}
 		case []any:
 			for _, child := range node {
-				emit(child, parent)
+				emit(child)
 			}
 		}
 	}
 	var root any
 	if json.Unmarshal(body, &root) == nil {
-		emit(root, "")
+		emit(root)
 		return
 	}
 	for _, line := range bytes.Split(body, []byte("\n")) {
@@ -602,7 +603,61 @@ func emitSemanticEvents(state *State, body []byte) {
 			continue
 		}
 		if json.Unmarshal(line, &root) == nil {
-			emit(root, "")
+			emit(root)
 		}
 	}
+}
+
+func semanticEventForObject(node map[string]any) (kind, field string, payload any, ok bool) {
+	if node == nil {
+		return "", "", nil, false
+	}
+	for key, value := range node {
+		lower := strings.ToLower(strings.TrimSpace(key))
+		if lower == "type" {
+			if kind = semanticTypeKind(value); kind != "" {
+				return kind, key, node, true
+			}
+		}
+		if lower == "role" && strings.EqualFold(strings.TrimSpace(stringValue(value)), "tool") {
+			return "tool.result", key, node, true
+		}
+	}
+	for key, value := range node {
+		if kind = semanticFieldKind(strings.ToLower(strings.TrimSpace(key))); kind != "" {
+			return kind, key, value, true
+		}
+	}
+	return "", "", nil, false
+}
+
+func semanticFieldKind(field string) string {
+	switch field {
+	case "reasoning_content", "reasoningcontent", "reasoning", "thinking", "thought", "thought_signature", "thoughtsignature":
+		return "reasoning"
+	case "tool_calls", "tooluse", "tool_use", "tool_call", "toolcall", "function_call", "functioncall", "custom_tool_call", "customtoolcall":
+		return "tool.call"
+	case "tool_result", "tool_results", "toolresult", "toolresults", "function_call_output", "functioncalloutput", "functionresponse", "function_response":
+		return "tool.result"
+	default:
+		return ""
+	}
+}
+
+func semanticTypeKind(value any) string {
+	switch strings.ToLower(strings.TrimSpace(stringValue(value))) {
+	case "reasoning", "thinking", "thought":
+		return "reasoning"
+	case "tool_use", "tool_call", "function_call", "custom_tool_call":
+		return "tool.call"
+	case "tool_result", "function_call_output", "function_response", "tool_response":
+		return "tool.result"
+	default:
+		return ""
+	}
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
 }

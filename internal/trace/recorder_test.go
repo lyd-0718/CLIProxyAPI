@@ -282,6 +282,38 @@ func TestRequestSemanticEventsAreRecorded(t *testing.T) {
 	_ = recorder.Close()
 }
 
+func TestStandardSemanticObjectEventsAreRecorded(t *testing.T) {
+	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir()})
+	if errNew != nil {
+		t.Fatal(errNew)
+	}
+	req, _ := http.NewRequest(http.MethodPost, "http://example.test/v1/messages", nil)
+	state := NewState(recorder, req, []byte(`{"content":[{"type":"thinking","thinking":"reason"},{"type":"tool_use","id":"call-1","name":"search"}],"messages":[{"role":"tool","tool_call_id":"call-1","content":"done"}]}`))
+	if err := state.Begin(); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvents(t, recorder, state.sessionID, 4)
+	detail, errGet := recorder.GetSession(state.sessionID)
+	if errGet != nil {
+		t.Fatal(errGet)
+	}
+	var reasoning, toolCall, toolResult bool
+	for _, event := range detail.Events {
+		switch event.Kind {
+		case "reasoning":
+			reasoning = true
+		case "tool.call":
+			toolCall = true
+		case "tool.result":
+			toolResult = true
+		}
+	}
+	if !reasoning || !toolCall || !toolResult {
+		t.Fatalf("standard semantic events missing: reasoning=%v tool_call=%v tool_result=%v", reasoning, toolCall, toolResult)
+	}
+	_ = recorder.Close()
+}
+
 func TestRecorderEnforcesMaxBytesForFinalizedFiles(t *testing.T) {
 	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir(), MaxFileBytes: 256, MaxBytes: 900})
 	if errNew != nil {
