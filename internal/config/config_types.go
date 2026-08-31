@@ -214,6 +214,28 @@ type RemoteManagement struct {
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
 }
 
+// TraceConfig controls the built-in session trace recorder.
+type TraceConfig struct {
+	Enabled            bool   `yaml:"enabled" json:"enabled"`
+	Dir                string `yaml:"dir,omitempty" json:"dir,omitempty"`
+	MaxFileBytes       int64  `yaml:"max-file-bytes,omitempty" json:"max-file-bytes,omitempty"`
+	RetentionDays      int    `yaml:"retention-days,omitempty" json:"retention-days,omitempty"`
+	MetadataDays       int    `yaml:"metadata-days,omitempty" json:"metadata-days,omitempty"`
+	MaxBytes           int64  `yaml:"max-bytes,omitempty" json:"max-bytes,omitempty"`
+	RecordStreamChunks bool   `yaml:"record-stream-chunks,omitempty" json:"record-stream-chunks,omitempty"`
+}
+
+// DefaultTraceConfig returns the built-in trace defaults.
+func DefaultTraceConfig() TraceConfig {
+	return TraceConfig{
+		Enabled:       true,
+		MaxFileBytes:  256 << 20,
+		RetentionDays: 30,
+		MetadataDays:  180,
+		MaxBytes:      10 << 30,
+	}
+}
+
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
 // It provides configuration options for automatic failover mechanisms.
 type QuotaExceeded struct {

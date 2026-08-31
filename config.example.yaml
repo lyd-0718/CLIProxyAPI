@@ -125,6 +125,18 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# Durable Session/Turn traces. Trace bodies are stored as daily NDJSON files;
+# SQLite stores the query index. Keep this directory private because raw
+# request headers and bodies are retained by design for internal debugging.
+trace:
+  enabled: true
+  dir: "traces"
+  max-file-bytes: 268435456
+  retention-days: 30
+  metadata-days: 180
+  max-bytes: 10737418240
+  record-stream-chunks: false
+
 # How long (in seconds) usage queue items are retained in memory for the Management API.
 # The local Redis RESP usage output is disabled.
 # Default: 60. Max: 3600.

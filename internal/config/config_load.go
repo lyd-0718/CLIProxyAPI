@@ -36,7 +36,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		if optional {
 			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
 				// Missing and optional: return empty config (cloud deploy standby).
-				cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
+				cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig(), Trace: DefaultTraceConfig()}
 				cfg.NormalizePluginsConfig()
 				return cfg, nil
 			}
@@ -46,14 +46,14 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(bytes.TrimSpace(data)) == 0 {
-		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
+		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig(), Trace: DefaultTraceConfig()}
 		cfg.NormalizePluginsConfig()
 		return cfg, nil
 	}
 
 	if errValidate := validateCredentialWeightYAML(data); errValidate != nil {
 		if optional {
-			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
+			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig(), Trace: DefaultTraceConfig()}
 			cfgOptional.NormalizePluginsConfig()
 			return cfgOptional, nil
 		}
@@ -78,10 +78,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
+	cfg.Trace = DefaultTraceConfig()
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
-			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
+			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig(), Trace: DefaultTraceConfig()}
 			cfgOptional.NormalizePluginsConfig()
 			return cfgOptional, nil
 		}

@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/trace"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -63,6 +64,11 @@ func requestLogCaptureEnabled(cfg *config.Config) bool {
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	trace.RecordUpstreamRequestForContext(ctx, trace.UpstreamRequest{
+		URL: info.URL, Method: info.Method, Headers: info.Headers, Body: info.Body,
+		Provider: info.Provider, AuthID: info.AuthID, AuthLabel: info.AuthLabel,
+		AuthType: info.AuthType, AuthValue: info.AuthValue,
+	})
 	if cfg == nil || cfg.CommercialMode {
 		return
 	}
@@ -190,6 +196,7 @@ func newAPIRequestLogBuilder(index int, info UpstreamRequestLog, timestamp time.
 // RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
+	trace.RecordUpstreamResponseForContext(ctx, trace.UpstreamResponse{Status: status, Headers: headers})
 	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
@@ -218,6 +225,9 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 
 // RecordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
 func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
+	if err != nil {
+		trace.RecordUpstreamResponseForContext(ctx, trace.UpstreamResponse{Error: err.Error()})
+	}
 	if !requestLogCaptureEnabled(cfg) || err == nil {
 		return
 	}
@@ -243,6 +253,7 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
+	trace.RecordUpstreamResponseForContext(ctx, trace.UpstreamResponse{Body: chunk})
 	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
@@ -287,6 +298,11 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 
 // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
 func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	trace.RecordUpstreamRequestForContext(ctx, trace.UpstreamRequest{
+		URL: info.URL, Method: info.Method, Headers: info.Headers, Body: info.Body,
+		Provider: info.Provider, AuthID: info.AuthID, AuthLabel: info.AuthLabel,
+		AuthType: info.AuthType, AuthValue: info.AuthValue,
+	})
 	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
@@ -320,6 +336,7 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
 // RecordAPIWebsocketHandshake stores the upstream websocket handshake response metadata.
 func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
+	trace.RecordUpstreamResponseForContext(ctx, trace.UpstreamResponse{Status: status, Headers: headers})
 	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
@@ -378,6 +395,7 @@ func WebsocketUpgradeRequestURL(rawURL string) string {
 
 // AppendAPIWebsocketResponse stores an upstream websocket response frame in Gin context.
 func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
+	trace.RecordUpstreamResponseForContext(ctx, trace.UpstreamResponse{Body: payload})
 	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
@@ -409,6 +427,9 @@ func AppendCodexAPIWebsocketResponse(ctx context.Context, cfg *config.Config, pa
 
 // RecordAPIWebsocketError stores an upstream websocket error event in Gin context.
 func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage string, err error) {
+	if err != nil {
+		trace.RecordUpstreamResponseForContext(ctx, trace.UpstreamResponse{Error: stage + ": " + err.Error()})
+	}
 	if !requestLogCaptureEnabled(cfg) || err == nil {
 		return
 	}

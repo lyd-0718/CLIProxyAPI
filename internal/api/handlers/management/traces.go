@@ -1,0 +1,166 @@
+package management
+
+import (
+	"errors"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/trace"
+)
+
+func (h *Handler) getTraceRecorder() *trace.Recorder {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.traceRecorder
+}
+
+// GetTraceSessions returns indexed sessions ordered by most recent activity.
+func (h *Handler) GetTraceSessions(c *gin.Context) {
+	recorder := h.getTraceRecorder()
+	if recorder == nil || !recorder.Enabled() {
+		c.JSON(http.StatusOK, gin.H{"sessions": []trace.SessionSummary{}, "enabled": false})
+		return
+	}
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	sessions, errList := recorder.ListSessions(c.Query("q"), limit, offset)
+	if errList != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errList.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"sessions": sessions, "enabled": true})
+}
+
+// GetTraceSession returns one session and its ordered events.
+func (h *Handler) GetTraceSession(c *gin.Context) {
+	recorder := h.getTraceRecorder()
+	if recorder == nil || !recorder.Enabled() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "trace recorder disabled"})
+		return
+	}
+	detail, errGet := recorder.GetSession(c.Param("session_id"))
+	if errGet != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(errGet, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": errGet.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, detail)
+}
+
+// GetTraceEvents returns only the event stream for a session.
+func (h *Handler) GetTraceEvents(c *gin.Context) {
+	recorder := h.getTraceRecorder()
+	if recorder == nil || !recorder.Enabled() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "trace recorder disabled"})
+		return
+	}
+	detail, errGet := recorder.GetSession(c.Param("session_id"))
+	if errGet != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(errGet, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": errGet.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"events": detail.Events})
+}
+
+// GetTraceTurn returns events belonging to a single Turn.
+func (h *Handler) GetTraceTurn(c *gin.Context) {
+	recorder := h.getTraceRecorder()
+	if recorder == nil || !recorder.Enabled() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "trace recorder disabled"})
+		return
+	}
+	turnID := strings.TrimSpace(c.Param("turn_id"))
+	rows, errQuery := recorder.ReadTurn(turnID)
+	if errQuery != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(errQuery, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": errQuery.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"turn_id": turnID, "events": rows})
+}
+
+// ExportTraceSession returns the session's NDJSON representation.
+func (h *Handler) ExportTraceSession(c *gin.Context) {
+	recorder := h.getTraceRecorder()
+	if recorder == nil || !recorder.Enabled() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "trace recorder disabled"})
+		return
+	}
+	sessionID := c.Param("session_id")
+	if _, errGet := recorder.GetSession(sessionID); errGet != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(errGet, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": errGet.Error()})
+		return
+	}
+	payload, errExport := recorder.ExportSession(sessionID)
+	if errExport != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errExport.Error()})
+		return
+	}
+	c.Header("Content-Type", "application/x-ndjson")
+	c.Header("Content-Disposition", `attachment; filename="trace.ndjson"`)
+	c.Data(http.StatusOK, "application/x-ndjson", payload)
+}
+
+// DeleteTraceSession deletes one session and its files.
+func (h *Handler) DeleteTraceSession(c *gin.Context) {
+	recorder := h.getTraceRecorder()
+	if recorder == nil || !recorder.Enabled() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "trace recorder disabled"})
+		return
+	}
+	sessionID := c.Param("session_id")
+	if _, errGet := recorder.GetSession(sessionID); errGet != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(errGet, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": errGet.Error()})
+		return
+	}
+	if errDelete := recorder.DeleteSession(sessionID); errDelete != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errDelete.Error()})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// GetTraceSettings returns recorder health and retention settings.
+func (h *Handler) GetTraceSettings(c *gin.Context) {
+	recorder := h.getTraceRecorder()
+	if recorder == nil {
+		c.JSON(http.StatusOK, gin.H{"enabled": false})
+		return
+	}
+	stats, errStats := recorder.Stats()
+	if errStats != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errStats.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, stats)
+}
+
+// PatchTraceSettings intentionally reports immutable settings in the first
+// version. Configuration changes are applied on the next server restart.
+func (h *Handler) PatchTraceSettings(c *gin.Context) {
+	c.JSON(http.StatusNotImplemented, gin.H{"error": "trace settings are configured in config.yaml and require restart"})
+}

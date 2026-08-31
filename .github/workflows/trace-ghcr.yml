@@ -1,0 +1,83 @@
+name: trace-ghcr
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - feature/trace
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  PANEL_REPOSITORY: lyd-0718/Cli-Proxy-API-Management-Center
+  PANEL_REF: feature/trace
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout CPA
+        uses: actions/checkout@v4
+
+      - name: Checkout management center
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PANEL_REPOSITORY }}
+          ref: ${{ env.PANEL_REF }}
+          path: panel
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: panel/package.json
+
+      - name: Build management center
+        working-directory: panel
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund
+          npm run build
+
+      - name: Stage panel asset
+        run: |
+          mkdir -p static
+          cp panel/dist/index.html static/management.html
+          rm -rf panel
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/cliproxyapi
+          tags: |
+            type=raw,value=${{ github.ref_name == 'feature/trace' && 'trace' || 'main' }}-${{ github.sha }}
+            type=raw,value=${{ github.ref_name == 'feature/trace' && 'trace-latest' || 'main-latest' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}-${{ github.sha }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp || '' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

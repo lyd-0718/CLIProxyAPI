@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/trace"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -82,6 +84,9 @@ type Server struct {
 	// management handler
 	mgmt *managementHandlers.Handler
 
+	// traceRecorder persists request/session traces for the unified management center.
+	traceRecorder *trace.Recorder
+
 	// pluginHost owns dynamic plugin Management API route dispatch.
 	pluginHost *pluginhost.Host
 
@@ -137,6 +142,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
 	engine.Use(logging.CPATraceIDMiddleware())
+	traceRecorder := newTraceRecorder(cfg, configFilePath)
+	if traceRecorder != nil && traceRecorder.Enabled() {
+		engine.Use(trace.Middleware(traceRecorder))
+	}
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}
@@ -180,6 +189,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
 		pluginHost:          optionState.pluginHost,
+		traceRecorder:       traceRecorder,
 
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
 	}
@@ -202,6 +212,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	applySignatureCacheConfig(nil, cfg)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+	s.mgmt.SetTraceRecorder(traceRecorder)
 	s.mgmt.SetPluginHost(optionState.pluginHost)
 	s.mgmt.SetConfigReloadHook(optionState.configReloadHook)
 	if optionState.localPassword != "" {
@@ -252,6 +263,33 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	return s
+}
+
+func newTraceRecorder(cfg *config.Config, configFilePath string) *trace.Recorder {
+	if cfg == nil || cfg.CommercialMode || !cfg.Trace.Enabled {
+		return nil
+	}
+	root := strings.TrimSpace(cfg.Trace.Dir)
+	if root == "" {
+		root = filepath.Join(filepath.Dir(configFilePath), "traces")
+	}
+	if !filepath.IsAbs(root) {
+		root = filepath.Join(filepath.Dir(configFilePath), root)
+	}
+	recorder, errNew := trace.NewRecorder(trace.Config{
+		Enabled:            true,
+		RootDir:            root,
+		MaxFileBytes:       cfg.Trace.MaxFileBytes,
+		RetentionDays:      cfg.Trace.RetentionDays,
+		MetadataDays:       cfg.Trace.MetadataDays,
+		MaxBytes:           cfg.Trace.MaxBytes,
+		RecordStreamChunks: cfg.Trace.RecordStreamChunks,
+	})
+	if errNew != nil {
+		log.WithError(errNew).Warn("trace recorder disabled")
+		return nil
+	}
+	return recorder
 }
 
 // Start begins listening for and serving HTTP or HTTPS requests.
@@ -389,6 +427,11 @@ func (s *Server) Stop(ctx context.Context) error {
 	errShutdown := s.server.Shutdown(ctx)
 	if s.codexLiveHandler != nil {
 		s.codexLiveHandler.Close()
+	}
+	if s.traceRecorder != nil {
+		if errClose := s.traceRecorder.Close(); errClose != nil {
+			log.WithError(errClose).Warn("failed to close trace recorder")
+		}
 	}
 	if errShutdown != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", errShutdown)
