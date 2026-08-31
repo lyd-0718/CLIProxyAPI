@@ -500,6 +500,122 @@ func TestStreamingSemanticEventsAreRecordedFromSSE(t *testing.T) {
 	_ = recorder.Close()
 }
 
+func TestOpenAIAndAnthropicProtocolTraces(t *testing.T) {
+	tests := []struct {
+		name        string
+		path        string
+		model       string
+		requestBody  string
+		outputBody   string
+		wantOutput   string
+	}{
+		{
+			name:  "openai non-stream",
+			path:  "/v1/chat/completions",
+			model: "gpt-trace-nonstream",
+			requestBody: `{"model":"gpt-trace-nonstream","messages":[{"role":"user","content":"lookup"},{"role":"tool","tool_call_id":"call-openai","content":"result"}]}`,
+			outputBody:  `{"id":"chatcmpl-trace","object":"chat.completion","model":"gpt-trace-nonstream","choices":[{"index":0,"message":{"role":"assistant","content":"answer","reasoning_content":"think","tool_calls":[{"id":"call-openai","type":"function","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`,
+			wantOutput:  "answer",
+		},
+		{
+			name:  "openai stream",
+			path:  "/v1/chat/completions",
+			model: "gpt-trace-stream",
+			requestBody: `{"model":"gpt-trace-stream","messages":[{"role":"user","content":"lookup"},{"role":"tool","tool_call_id":"call-openai-stream","content":"result"}]}`,
+			outputBody: strings.Join([]string{
+				`data: {"choices":[{"delta":{"reasoning_content":"think"}}]}`,
+				`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-openai-stream","function":{"name":"lookup","arguments":"{}"}}]}}]}`,
+				`data: {"choices":[{"delta":{"content":"answer"}}]}`,
+				`data: [DONE]`,
+			}, "\n"),
+			wantOutput: "answer",
+		},
+		{
+			name:  "anthropic non-stream",
+			path:  "/v1/messages",
+			model: "claude-trace-nonstream",
+			requestBody: `{"model":"claude-trace-nonstream","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-anthropic","content":"result"}]}]}`,
+			outputBody:  `{"id":"msg-trace","type":"message","role":"assistant","model":"claude-trace-nonstream","content":[{"type":"thinking","thinking":"think"},{"type":"tool_use","id":"call-anthropic","name":"lookup","input":{}}],"stop_reason":"tool_use"}`,
+			wantOutput:  "call-anthropic",
+		},
+		{
+			name:  "anthropic stream",
+			path:  "/v1/messages",
+			model: "claude-trace-stream",
+			requestBody: `{"model":"claude-trace-stream","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-anthropic-stream","content":"result"}]}]}`,
+			outputBody: strings.Join([]string{
+				`event: content_block_start`,
+				`data: {"type":"content_block_start","content_block":{"type":"thinking","thinking":"think"}}`,
+				`data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"call-anthropic-stream","name":"lookup","input":{}}}`,
+				`data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"more"}}`,
+				`data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{}"}}`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}`,
+				`data: [DONE]`,
+			}, "\n"),
+			wantOutput: "call-anthropic-stream",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir()})
+			if errNew != nil {
+				t.Fatal(errNew)
+			}
+			req, errReq := http.NewRequest(http.MethodPost, "http://example.test"+test.path, strings.NewReader(test.requestBody))
+			if errReq != nil {
+				t.Fatal(errReq)
+			}
+			state := NewState(recorder, req, []byte(test.requestBody))
+			if errBegin := state.Begin(); errBegin != nil {
+				t.Fatal(errBegin)
+			}
+			state.AppendDownstreamChunk([]byte(test.outputBody))
+			state.RecordUsage(coreusage.Record{
+				Provider: "protocol-test",
+				Model:    test.model,
+				APIKey:   "trace-test-key",
+				Latency:  120 * time.Millisecond,
+				TTFT:     30 * time.Millisecond,
+				Detail: coreusage.Detail{
+					InputTokens:         11,
+					OutputTokens:        7,
+					ReasoningTokens:     2,
+					CachedTokens:        3,
+					CacheReadTokens:     3,
+					CacheCreationTokens: 1,
+					TotalTokens:         18,
+				},
+			})
+			state.Finish(http.StatusOK, http.Header{"Content-Type": {"application/json"}})
+
+			waitForEvents(t, recorder, state.sessionID, 7)
+			detail, errGet := recorder.GetSession(state.sessionID)
+			if errGet != nil {
+				t.Fatal(errGet)
+			}
+			seen := make(map[string]bool)
+			for _, event := range detail.Events {
+				seen[event.Kind] = true
+			}
+			for _, kind := range []string{"request.input", "tool.result", "reasoning", "tool.call", "usage", "model.output", "turn.completed"} {
+				if !seen[kind] {
+					t.Fatalf("missing %s event in %s trace", kind, test.name)
+				}
+			}
+			exported, errExport := recorder.ExportSession(state.sessionID)
+			if errExport != nil || !strings.Contains(string(exported), test.wantOutput) {
+				t.Fatalf("model output was not preserved: err=%v trace=%s", errExport, exported)
+			}
+			turns, errTurns := recorder.ListTurns(Filter{Model: test.model}, 10, 0)
+			if errTurns != nil || len(turns) != 1 || turns[0].InputTokens != 11 || turns[0].CachedTokens != 3 || turns[0].TotalTokens != 18 {
+				t.Fatalf("usage index was not preserved: err=%v turns=%#v", errTurns, turns)
+			}
+			_ = recorder.Close()
+		})
+	}
+}
+
 func TestRecorderEnforcesMaxBytesForFinalizedFiles(t *testing.T) {
 	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir(), MaxFileBytes: 256, MaxBytes: 900})
 	if errNew != nil {
