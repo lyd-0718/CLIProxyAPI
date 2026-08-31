@@ -33,19 +33,39 @@ type SessionDetail struct {
 
 // ListSessions lists recent sessions with optional text filtering.
 func (r *Recorder) ListSessions(query string, limit, offset int) ([]SessionSummary, error) {
+	return r.ListSessionsFiltered(Filter{Query: query}, limit, offset)
+}
+
+// ListSessionsFiltered lists sessions using the same identity and time
+// filters as the overview and request views.
+func (r *Recorder) ListSessionsFiltered(filter Filter, limit, offset int) ([]SessionSummary, error) {
 	if !r.Enabled() {
 		return []SessionSummary{}, nil
 	}
-	if limit <= 0 || limit > 500 {
-		limit = 100
+	limit, offset = normalizePage(limit, offset, 100)
+	query := strings.TrimSpace(filter.Query)
+	conditions := []string{"(? = '' OR s.session_id LIKE ? OR s.session_source LIKE ?)"}
+	args := []any{query, "%" + query + "%", "%" + query + "%"}
+	model := strings.TrimSpace(filter.Model)
+	conditions = append(conditions, "(? = '' OR EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.session_id AND t.model LIKE ?))")
+	args = append(args, model, "%"+model+"%")
+	apiKey := strings.TrimSpace(filter.APIKey)
+	conditions = append(conditions, "(? = '' OR EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.session_id AND t.api_key LIKE ?))")
+	args = append(args, apiKey, "%"+apiKey+"%")
+	source := strings.TrimSpace(filter.Source)
+	conditions = append(conditions, "(? = '' OR s.session_source LIKE ?)")
+	args = append(args, source, "%"+source+"%")
+	if !filter.From.IsZero() {
+		conditions = append(conditions, "s.last_at >= ?")
+		args = append(args, filter.From.UTC().Format(time.RFC3339Nano))
 	}
-	if offset < 0 {
-		offset = 0
+	if !filter.To.IsZero() {
+		conditions = append(conditions, "s.last_at <= ?")
+		args = append(args, filter.To.UTC().Format(time.RFC3339Nano))
 	}
-	query = strings.TrimSpace(query)
-	rows, errQuery := r.db.Query(`SELECT session_id,session_source,first_at,last_at,turn_count,event_count,bytes,incomplete,file_path
-		FROM sessions WHERE (? = '' OR session_id LIKE ? OR session_source LIKE ?)
-		ORDER BY last_at DESC LIMIT ? OFFSET ?`, query, "%"+query+"%", "%"+query+"%", limit, offset)
+	rows, errQuery := r.db.Query(`SELECT s.session_id,s.session_source,s.first_at,s.last_at,s.turn_count,s.event_count,s.bytes,s.incomplete,s.file_path
+		FROM sessions s WHERE `+strings.Join(conditions, " AND ")+`
+		ORDER BY s.last_at DESC LIMIT ? OFFSET ?`, append(args, limit, offset)...)
 	if errQuery != nil {
 		return nil, errQuery
 	}

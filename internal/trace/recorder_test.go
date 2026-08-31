@@ -216,6 +216,46 @@ func TestRecorderPersistsEventsAcrossRestart(t *testing.T) {
 	_ = restarted.Close()
 }
 
+func TestTraceAnalyticsListRequestsAndOverview(t *testing.T) {
+	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir()})
+	if errNew != nil {
+		t.Fatal(errNew)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	for index, sessionID := range []string{"analytics-a", "analytics-b"} {
+		turnID := fmt.Sprintf("turn-%d", index)
+		if err := recorder.Append(Event{SchemaVersion: 1, EventID: fmt.Sprintf("analytics-request-%d", index), Timestamp: now.Add(time.Duration(index) * time.Minute), SessionID: sessionID, SessionSource: "explicit", TurnID: turnID, RequestID: fmt.Sprintf("request-%d", index), Kind: "request.input", Payload: []byte(`{"model":"gpt-test"}`)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := recorder.Append(Event{SchemaVersion: 1, EventID: fmt.Sprintf("analytics-usage-%d", index), Timestamp: now.Add(time.Duration(index)*time.Minute + time.Second), SessionID: sessionID, SessionSource: "explicit", TurnID: turnID, Kind: "usage", Payload: []byte(fmt.Sprintf(`{"model":"gpt-test","provider":"openai","api_key":"key-%d","input_tokens":10,"output_tokens":4,"reasoning_tokens":2,"cached_tokens":3,"total_tokens":14,"latency_ms":100,"ttft_ms":20}`, index))}); err != nil {
+			t.Fatal(err)
+		}
+		if err := recorder.Append(Event{SchemaVersion: 1, EventID: fmt.Sprintf("analytics-complete-%d", index), Timestamp: now.Add(time.Duration(index)*time.Minute + 2*time.Second), SessionID: sessionID, SessionSource: "explicit", TurnID: turnID, Kind: "turn.completed", Payload: []byte(`{"status":200,"failed":false,"incomplete":false}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitForEvents(t, recorder, "analytics-a", 3)
+	waitForEvents(t, recorder, "analytics-b", 3)
+	requests, errRequests := recorder.ListTurns(Filter{Model: "gpt-test"}, 10, 0)
+	if errRequests != nil {
+		t.Fatal(errRequests)
+	}
+	if len(requests) != 2 || requests[0].InputTokens != 10 || requests[0].CachedTokens != 3 {
+		t.Fatalf("requests = %#v", requests)
+	}
+	overview, errOverview := recorder.GetOverview(Filter{From: now.Add(-time.Second), To: now.Add(3 * time.Minute)})
+	if errOverview != nil {
+		t.Fatal(errOverview)
+	}
+	if overview.Sessions != 2 || overview.Turns != 2 || overview.Events != 6 || overview.InputTokens != 20 || overview.CachedTokens != 6 {
+		t.Fatalf("overview = %#v", overview)
+	}
+	if len(overview.Models) != 1 || overview.Models[0].Name != "gpt-test" || len(overview.APIKeys) != 2 || len(overview.Timeline) == 0 {
+		t.Fatalf("overview breakdowns = %#v", overview)
+	}
+	_ = recorder.Close()
+}
+
 func TestRequestSemanticEventsAreRecorded(t *testing.T) {
 	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir()})
 	if errNew != nil {

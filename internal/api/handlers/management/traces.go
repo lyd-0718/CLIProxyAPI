@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/trace"
@@ -29,12 +30,65 @@ func (h *Handler) GetTraceSessions(c *gin.Context) {
 	}
 	limit, _ := strconv.Atoi(c.Query("limit"))
 	offset, _ := strconv.Atoi(c.Query("offset"))
-	sessions, errList := recorder.ListSessions(c.Query("q"), limit, offset)
+	sessions, errList := recorder.ListSessionsFiltered(parseTraceFilter(c), limit, offset)
 	if errList != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errList.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"sessions": sessions, "enabled": true})
+}
+
+// GetTraceOverview returns aggregate request and token metrics for the chosen
+// time window. It only reads the SQLite index; trace bodies stay on disk.
+func (h *Handler) GetTraceOverview(c *gin.Context) {
+	recorder := h.getTraceRecorder()
+	if recorder == nil || !recorder.Enabled() {
+		c.JSON(http.StatusOK, trace.Overview{Enabled: false, Models: []trace.Breakdown{}, APIKeys: []trace.Breakdown{}, Sources: []trace.Breakdown{}, Timeline: []trace.TimelineBucket{}})
+		return
+	}
+	overview, errOverview := recorder.GetOverview(parseTraceFilter(c))
+	if errOverview != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errOverview.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, overview)
+}
+
+// GetTraceRequests returns compact Turn rows for request-level browsing.
+func (h *Handler) GetTraceRequests(c *gin.Context) {
+	recorder := h.getTraceRecorder()
+	if recorder == nil || !recorder.Enabled() {
+		c.JSON(http.StatusOK, gin.H{"requests": []trace.TurnSummary{}, "enabled": false})
+		return
+	}
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	offset, _ := strconv.Atoi(c.Query("offset"))
+	requests, errList := recorder.ListTurns(parseTraceFilter(c), limit, offset)
+	if errList != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errList.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"requests": requests, "enabled": true})
+}
+
+func parseTraceFilter(c *gin.Context) trace.Filter {
+	filter := trace.Filter{
+		Query:  c.Query("q"),
+		Model:  c.Query("model"),
+		APIKey: c.Query("api_key"),
+		Source: c.Query("source"),
+	}
+	if value := strings.TrimSpace(c.Query("from")); value != "" {
+		if parsed, errParse := time.Parse(time.RFC3339Nano, value); errParse == nil {
+			filter.From = parsed
+		}
+	}
+	if value := strings.TrimSpace(c.Query("to")); value != "" {
+		if parsed, errParse := time.Parse(time.RFC3339Nano, value); errParse == nil {
+			filter.To = parsed
+		}
+	}
+	return filter
 }
 
 // GetTraceSession returns one session and its ordered events.

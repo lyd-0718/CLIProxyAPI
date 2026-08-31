@@ -82,6 +82,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
+		mgmt.GET("/traces/overview", s.mgmt.GetTraceOverview)
+		mgmt.GET("/traces/requests", s.mgmt.GetTraceRequests)
 		mgmt.GET("/traces/sessions", s.mgmt.GetTraceSessions)
 		mgmt.GET("/traces/sessions/:session_id/events", s.mgmt.GetTraceEvents)
 		mgmt.GET("/traces/sessions/:session_id/export", s.mgmt.ExportTraceSession)
