@@ -282,6 +282,9 @@ func (s *State) Finish(status int, headers http.Header) {
 			"body":    rawPayload(body),
 		})
 	}
+	s.mu.Lock()
+	incomplete = s.incomplete
+	s.mu.Unlock()
 	_ = s.append("model.output", map[string]any{
 		"status":           statusCode,
 		"headers":          responseHeaders,
@@ -292,6 +295,9 @@ func (s *State) Finish(status int, headers http.Header) {
 		"trace_incomplete": incomplete,
 	})
 	emitSemanticEventsFrom(s, body, "model.output")
+	s.mu.Lock()
+	incomplete = s.incomplete
+	s.mu.Unlock()
 	_ = s.append("turn.completed", map[string]any{
 		"status":     statusCode,
 		"failed":     statusCode >= http.StatusBadRequest,

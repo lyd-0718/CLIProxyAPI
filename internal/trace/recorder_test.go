@@ -301,10 +301,24 @@ func TestInterruptedUpstreamResponseMarksTraceIncomplete(t *testing.T) {
 	if !detail.Incomplete {
 		t.Fatal("session should be marked incomplete after upstream interruption")
 	}
+	sawCompleted := false
 	for _, event := range detail.Events {
 		if event.Kind == "upstream.response" && !event.Incomplete {
 			t.Fatal("interrupted upstream response event should be marked incomplete")
 		}
+		if event.Kind == "turn.completed" {
+			sawCompleted = true
+			var payload map[string]any
+			if errDecode := json.Unmarshal(event.Payload, &payload); errDecode != nil {
+				t.Fatal(errDecode)
+			}
+			if incomplete, _ := payload["incomplete"].(bool); !incomplete {
+				t.Fatalf("turn.completed payload incomplete = %v, want true", payload["incomplete"])
+			}
+		}
+	}
+	if !sawCompleted {
+		t.Fatal("missing turn.completed event")
 	}
 	_ = recorder.Close()
 }
