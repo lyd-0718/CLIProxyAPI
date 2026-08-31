@@ -367,7 +367,8 @@ func TestRecorderRepairsAggregateRowsOnRestart(t *testing.T) {
 	if errAppend := state.append("request.input", map[string]any{"body": map[string]any{"model": "repair-test"}}); errAppend != nil {
 		t.Fatal(errAppend)
 	}
-	waitForEvents(t, recorder, state.sessionID, 1)
+	state.RecordUsage(coreusage.Record{Model: "repair-test"})
+	waitForEvents(t, recorder, state.sessionID, 2)
 	if _, errCorrupt := recorder.db.Exec("UPDATE sessions SET incomplete = 999, file_path = '0' WHERE session_id = ?", state.sessionID); errCorrupt != nil {
 		t.Fatal(errCorrupt)
 	}
