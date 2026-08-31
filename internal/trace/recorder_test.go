@@ -160,6 +160,62 @@ func TestUpstreamResponseBodyIsCapturedAsRawPayload(t *testing.T) {
 	_ = recorder.Close()
 }
 
+func TestInterruptedUpstreamResponseMarksTraceIncomplete(t *testing.T) {
+	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir()})
+	if errNew != nil {
+		t.Fatal(errNew)
+	}
+	req, _ := http.NewRequest(http.MethodPost, "http://example.test/v1/chat/completions", nil)
+	state := NewState(recorder, req, nil)
+	ctx := contextWithState(state)
+	RecordUpstreamResponseForContext(ctx, UpstreamResponse{Status: 200, Error: "connection reset"})
+	state.Finish(http.StatusBadGateway, nil)
+	waitForEvents(t, recorder, state.sessionID, 4)
+	detail, errGet := recorder.GetSession(state.sessionID)
+	if errGet != nil {
+		t.Fatal(errGet)
+	}
+	if !detail.Incomplete {
+		t.Fatal("session should be marked incomplete after upstream interruption")
+	}
+	for _, event := range detail.Events {
+		if event.Kind == "upstream.response" && !event.Incomplete {
+			t.Fatal("interrupted upstream response event should be marked incomplete")
+		}
+	}
+	_ = recorder.Close()
+}
+
+func TestRecorderPersistsEventsAcrossRestart(t *testing.T) {
+	root := t.TempDir()
+	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: root})
+	if errNew != nil {
+		t.Fatal(errNew)
+	}
+	req, _ := http.NewRequest(http.MethodPost, "http://example.test/v1/chat/completions", nil)
+	state := NewState(recorder, req, nil)
+	if errAppend := state.append("request.input", map[string]any{"body": map[string]any{"model": "test"}}); errAppend != nil {
+		t.Fatal(errAppend)
+	}
+	waitForEvents(t, recorder, state.sessionID, 1)
+	if errClose := recorder.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+
+	restarted, errRestart := NewRecorder(Config{Enabled: true, RootDir: root})
+	if errRestart != nil {
+		t.Fatal(errRestart)
+	}
+	detail, errGet := restarted.GetSession(state.sessionID)
+	if errGet != nil {
+		t.Fatal(errGet)
+	}
+	if len(detail.Events) != 1 || detail.Events[0].Kind != "request.input" {
+		t.Fatalf("persisted events = %#v", detail.Events)
+	}
+	_ = restarted.Close()
+}
+
 func TestRequestSemanticEventsAreRecorded(t *testing.T) {
 	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir()})
 	if errNew != nil {

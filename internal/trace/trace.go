@@ -179,6 +179,7 @@ func (s *State) append(kind string, payload any) error {
 		TraceID:       s.traceID,
 		Sequence:      s.sequence,
 		Kind:          strings.TrimSpace(kind),
+		Incomplete:    s.incomplete,
 		Payload:       raw,
 	}
 	s.mu.Unlock()
@@ -189,6 +190,18 @@ func (s *State) append(kind string, payload any) error {
 		return errAppend
 	}
 	return nil
+}
+
+// markIncomplete records that the request could not produce a complete trace.
+// The API request is still allowed to finish; management views expose this
+// state so operators do not mistake a partial capture for a complete one.
+func (s *State) markIncomplete() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.incomplete = true
+	s.mu.Unlock()
 }
 
 // Begin writes the downstream request event.
@@ -370,6 +383,9 @@ func RecordUpstreamRequestForContext(ctx context.Context, req UpstreamRequest) {
 // RecordUpstreamResponseForContext appends a raw provider response event.
 func RecordUpstreamResponseForContext(ctx context.Context, resp UpstreamResponse) {
 	if state := StateFromContext(ctx); state != nil {
+		if strings.TrimSpace(resp.Error) != "" {
+			state.markIncomplete()
+		}
 		_ = state.append("upstream.response", map[string]any{
 			"status":  resp.Status,
 			"headers": resp.Headers,
