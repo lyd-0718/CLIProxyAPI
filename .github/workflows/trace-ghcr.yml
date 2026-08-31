@@ -49,6 +49,11 @@ jobs:
         # separate follow-up before merging this branch upstream.
         run: go test ./internal/trace ./internal/api/handlers/management ./internal/runtime/executor/helps
 
+      - name: Build server binary
+        run: |
+          go build -o /tmp/cli-proxy-api ./cmd/server
+          rm -f /tmp/cli-proxy-api
+
       - name: Build management center
         working-directory: panel
         run: |
