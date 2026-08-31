@@ -3,6 +3,7 @@ package trace
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -227,6 +228,57 @@ func TestUpstreamResponseBodyIsCapturedAsRawPayload(t *testing.T) {
 	}
 	if !strings.Contains(string(exported), `"status":200`) || !strings.Contains(string(exported), `"content":"ok"`) {
 		t.Fatalf("upstream response was not recorded as raw JSON: %s", exported)
+	}
+	_ = recorder.Close()
+}
+
+func TestUpstreamSemanticEventsIncludeAllFieldsAndSource(t *testing.T) {
+	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir()})
+	if errNew != nil {
+		t.Fatal(errNew)
+	}
+	req, _ := http.NewRequest(http.MethodPost, "http://example.test/v1/chat/completions", nil)
+	state := NewState(recorder, req, nil)
+	ctx := contextWithState(state)
+	RecordUpstreamRequestForContext(ctx, UpstreamRequest{
+		Body: []byte(`{"reasoning_content":"reason","tool_calls":[{"id":"call-1"}]}`),
+	})
+	RecordUpstreamResponseForContext(ctx, UpstreamResponse{
+		Status: 200,
+		Body:   []byte(`{"type":"function_call_output","call_id":"call-1","output":"done"}`),
+	})
+	waitForEvents(t, recorder, state.sessionID, 5)
+	detail, errGet := recorder.GetSession(state.sessionID)
+	if errGet != nil {
+		t.Fatal(errGet)
+	}
+	var reasoning, toolCall, toolResult bool
+	for _, event := range detail.Events {
+		if event.Kind == "reasoning" {
+			reasoning = true
+		}
+		if event.Kind == "tool.call" {
+			toolCall = true
+		}
+		if event.Kind == "tool.result" {
+			toolResult = true
+		}
+		if event.Kind == "reasoning" || event.Kind == "tool.call" || event.Kind == "tool.result" {
+			var payload map[string]any
+			if errDecode := json.Unmarshal(event.Payload, &payload); errDecode != nil {
+				t.Fatal(errDecode)
+			}
+			wantSource := "upstream.request"
+			if event.Kind == "tool.result" {
+				wantSource = "upstream.response"
+			}
+			if payload["source"] != wantSource {
+				t.Fatalf("semantic event source = %v for %s, want %s", payload["source"], event.Kind, wantSource)
+			}
+		}
+	}
+	if !reasoning || !toolCall || !toolResult {
+		t.Fatalf("upstream semantic events missing: reasoning=%v tool_call=%v tool_result=%v", reasoning, toolCall, toolResult)
 	}
 	_ = recorder.Close()
 }

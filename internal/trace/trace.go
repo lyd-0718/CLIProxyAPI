@@ -219,7 +219,7 @@ func (s *State) Begin() error {
 	}
 	// Tool calls, tool results, and reasoning can be present in the incoming
 	// conversation as well as in the model response, so inspect both sides.
-	emitSemanticEvents(s, s.requestBody)
+	emitSemanticEventsFrom(s, s.requestBody, "request.input")
 	return nil
 }
 
@@ -291,7 +291,7 @@ func (s *State) Finish(status int, headers http.Header) {
 		"failed":           statusCode >= http.StatusBadRequest,
 		"trace_incomplete": incomplete,
 	})
-	emitSemanticEvents(s, body)
+	emitSemanticEventsFrom(s, body, "model.output")
 	_ = s.append("turn.completed", map[string]any{
 		"status":     statusCode,
 		"failed":     statusCode >= http.StatusBadRequest,
@@ -382,6 +382,7 @@ func RecordUpstreamRequestForContext(ctx context.Context, req UpstreamRequest) {
 			"auth_value": req.AuthValue,
 			"error":      req.Error,
 		})
+		emitSemanticEventsFrom(state, req.Body, "upstream.request")
 	}
 }
 
@@ -397,6 +398,7 @@ func RecordUpstreamResponseForContext(ctx context.Context, resp UpstreamResponse
 			"body":    rawPayload(resp.Body),
 			"error":   resp.Error,
 		})
+		emitSemanticEventsFrom(state, resp.Body, "upstream.response")
 	}
 }
 
@@ -571,6 +573,10 @@ func cloneHeader(src http.Header) http.Header {
 }
 
 func emitSemanticEvents(state *State, body []byte) {
+	emitSemanticEventsFrom(state, body, "")
+}
+
+func emitSemanticEventsFrom(state *State, body []byte, source string) {
 	if state == nil || len(body) == 0 {
 		return
 	}
@@ -580,12 +586,12 @@ func emitSemanticEvents(state *State, body []byte) {
 		case map[string]any:
 			semanticEvents, objectKinds := semanticEventsForObject(node)
 			for _, semanticEvent := range semanticEvents {
-				_ = state.append(semanticEvent.kind, map[string]any{"field": semanticEvent.field, "value": semanticEvent.payload})
+				_ = state.append(semanticEvent.kind, semanticPayload(semanticEvent.field, semanticEvent.payload, source))
 			}
 			for key, child := range node {
 				lower := strings.ToLower(strings.TrimSpace(key))
 				if kind := semanticFieldKind(lower); kind != "" && !objectKinds[kind] {
-					_ = state.append(kind, map[string]any{"field": key, "value": child})
+					_ = state.append(kind, semanticPayload(key, child, source))
 				}
 				emit(child)
 			}
@@ -609,6 +615,14 @@ func emitSemanticEvents(state *State, body []byte) {
 			emit(root)
 		}
 	}
+}
+
+func semanticPayload(field string, value any, source string) map[string]any {
+	payload := map[string]any{"field": field, "value": value}
+	if strings.TrimSpace(source) != "" {
+		payload["source"] = source
+	}
+	return payload
 }
 
 type semanticEvent struct {
