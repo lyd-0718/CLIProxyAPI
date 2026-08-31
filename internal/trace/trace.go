@@ -323,8 +323,12 @@ func usagePayload(record coreusage.Record) map[string]any {
 		"auth_id":               record.AuthID,
 		"auth_index":            record.AuthIndex,
 		"auth_type":             record.AuthType,
+		"access_token_sha256":   record.AccessTokenSHA256,
 		"source":                record.Source,
 		"reasoning_effort":      record.ReasoningEffort,
+		"service_tier":          record.ServiceTier,
+		"response_service_tier": record.ResponseServiceTier,
+		"generate":              coreusage.GenerateEnabled(record.Generate),
 		"requested_at":          record.RequestedAt,
 		"latency_ms":            record.Latency.Milliseconds(),
 		"ttft_ms":               record.TTFT.Milliseconds(),
@@ -337,6 +341,7 @@ func usagePayload(record coreusage.Record) map[string]any {
 		"cache_read_tokens":     record.Detail.CacheReadTokens,
 		"cache_creation_tokens": record.Detail.CacheCreationTokens,
 		"total_tokens":          record.Detail.TotalTokens,
+		"token_breakdown":       record.Detail.TokenBreakdown,
 	}
 }
 

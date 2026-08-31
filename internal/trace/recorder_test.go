@@ -59,6 +59,10 @@ func TestRecorderPersistsSessionEventsAndUsage(t *testing.T) {
 	if !sawUsage || !sawOutput || !sawUpstream {
 		t.Fatalf("missing expected event kinds: usage=%v output=%v upstream=%v", sawUsage, sawOutput, sawUpstream)
 	}
+	exported, errExport := recorder.ExportSession("session-test")
+	if errExport != nil || !strings.Contains(string(exported), `"token_breakdown"`) {
+		t.Fatalf("usage token breakdown was not preserved: err=%v trace=%s", errExport, exported)
+	}
 	if errClose := recorder.Close(); errClose != nil {
 		t.Fatal(errClose)
 	}
