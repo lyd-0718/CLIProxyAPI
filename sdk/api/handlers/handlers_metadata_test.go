@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/trace"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -35,6 +36,26 @@ func TestGetContextWithCancelCapturesClientRequestMetadata(t *testing.T) {
 	}
 	if metadata.UserAgent != "test-client/1.0" {
 		t.Fatalf("UserAgent = %q", metadata.UserAgent)
+	}
+}
+
+func TestGetContextWithCancelCarriesTraceState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	state := trace.NewState(&trace.Recorder{}, request, nil)
+	if state == nil {
+		t.Fatal("expected trace state")
+	}
+	ginCtx.Request = request.WithContext(context.WithValue(request.Context(), trace.ContextKey, state))
+	ginCtx.Set(trace.ContextKey, state)
+
+	handler := &BaseAPIHandler{Cfg: &config.SDKConfig{}}
+	ctx, cancel := handler.GetContextWithCancel(nil, ginCtx, context.Background())
+	defer cancel()
+
+	if got := trace.StateFromContext(ctx); got != state {
+		t.Fatalf("trace state = %p, want %p", got, state)
 	}
 }
 
