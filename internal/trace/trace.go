@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -44,23 +45,24 @@ type Event struct {
 
 // UpstreamRequest is the raw outbound provider request captured by the executor helpers.
 type UpstreamRequest struct {
-	URL       string
-	Method    string
-	Headers   http.Header
-	Body      []byte
-	Provider  string
-	AuthID    string
-	AuthLabel string
-	AuthType  string
-	AuthValue string
+	URL       string      `json:"url"`
+	Method    string      `json:"method"`
+	Headers   http.Header `json:"headers,omitempty"`
+	Body      []byte      `json:"body,omitempty"`
+	Provider  string      `json:"provider,omitempty"`
+	AuthID    string      `json:"auth_id,omitempty"`
+	AuthLabel string      `json:"auth_label,omitempty"`
+	AuthType  string      `json:"auth_type,omitempty"`
+	AuthValue string      `json:"auth_value,omitempty"`
+	Error     string      `json:"error,omitempty"`
 }
 
 // UpstreamResponse describes one provider response observation.
 type UpstreamResponse struct {
-	Status  int
-	Headers http.Header
-	Body    []byte
-	Error   string
+	Status  int         `json:"status"`
+	Headers http.Header `json:"headers,omitempty"`
+	Body    []byte      `json:"body,omitempty"`
+	Error   string      `json:"error,omitempty"`
 }
 
 type contextGetter interface {
@@ -350,15 +352,102 @@ func traceIDFromContext(ctx context.Context) string {
 // RecordUpstreamRequestForContext appends a raw provider request event.
 func RecordUpstreamRequestForContext(ctx context.Context, req UpstreamRequest) {
 	if state := StateFromContext(ctx); state != nil {
-		_ = state.append("upstream.request", req)
+		_ = state.append("upstream.request", map[string]any{
+			"url":        req.URL,
+			"method":     req.Method,
+			"headers":    req.Headers,
+			"body":       rawPayload(req.Body),
+			"provider":   req.Provider,
+			"auth_id":    req.AuthID,
+			"auth_label": req.AuthLabel,
+			"auth_type":  req.AuthType,
+			"auth_value": req.AuthValue,
+			"error":      req.Error,
+		})
 	}
 }
 
 // RecordUpstreamResponseForContext appends a raw provider response event.
 func RecordUpstreamResponseForContext(ctx context.Context, resp UpstreamResponse) {
 	if state := StateFromContext(ctx); state != nil {
-		_ = state.append("upstream.response", resp)
+		_ = state.append("upstream.response", map[string]any{
+			"status":  resp.Status,
+			"headers": resp.Headers,
+			"body":    rawPayload(resp.Body),
+			"error":   resp.Error,
+		})
 	}
+}
+
+// WrapUpstreamResponseBody records the complete response body when the caller
+// consumes or closes an upstream response. It keeps the capture at the shared
+// HTTP transport boundary so every executor using UsageReporter is covered.
+func WrapUpstreamResponseBody(ctx context.Context, resp *http.Response) io.ReadCloser {
+	if resp == nil || resp.Body == nil {
+		return nil
+	}
+	return &upstreamResponseBody{
+		ReadCloser: resp.Body,
+		ctx:        ctx,
+		status:     resp.StatusCode,
+		headers:    cloneHeader(resp.Header),
+	}
+}
+
+type upstreamResponseBody struct {
+	io.ReadCloser
+	ctx        context.Context
+	status     int
+	headers    http.Header
+	mu         sync.Mutex
+	buffer     bytes.Buffer
+	once       sync.Once
+}
+
+func (b *upstreamResponseBody) Read(p []byte) (int, error) {
+	if b == nil || b.ReadCloser == nil {
+		return 0, io.ErrClosedPipe
+	}
+	n, errRead := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.mu.Lock()
+		_, _ = b.buffer.Write(p[:n])
+		b.mu.Unlock()
+	}
+	if errRead != nil {
+		b.finish(errRead != io.EOF)
+	}
+	return n, errRead
+}
+
+func (b *upstreamResponseBody) Close() error {
+	if b == nil || b.ReadCloser == nil {
+		return nil
+	}
+	errClose := b.ReadCloser.Close()
+	b.finish(true)
+	return errClose
+}
+
+func (b *upstreamResponseBody) finish(incomplete bool) {
+	if b == nil {
+		return
+	}
+	b.once.Do(func() {
+		b.mu.Lock()
+		body := bytes.Clone(b.buffer.Bytes())
+		b.mu.Unlock()
+		errText := ""
+		if incomplete {
+			errText = "upstream response body closed before EOF"
+		}
+		RecordUpstreamResponseForContext(b.ctx, UpstreamResponse{
+			Status:  b.status,
+			Headers: b.headers,
+			Body:    body,
+			Error:   errText,
+		})
+	})
 }
 
 func rawPayload(raw []byte) any {

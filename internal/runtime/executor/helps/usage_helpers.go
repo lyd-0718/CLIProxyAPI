@@ -476,11 +476,23 @@ type usageTTFTRoundTripper struct {
 }
 
 func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	requestBody, requestBodyErr := snapshotHTTPBody(req)
+	trace.RecordUpstreamRequestForContext(req.Context(), trace.UpstreamRequest{
+		URL:     requestURL(req),
+		Method:  requestMethod(req),
+		Headers: requestHeaders(req),
+		Body:    requestBody,
+		Error:   requestBodyErr,
+	})
 	cliproxyexecutor.MarkUpstreamAttempt(req.Context())
 	t.reporter.StartResponseTTFT()
 	resp, errRoundTrip := t.base.RoundTrip(req)
 	if errRoundTrip != nil {
+		trace.RecordUpstreamResponseForContext(req.Context(), trace.UpstreamResponse{Error: errRoundTrip.Error()})
 		return resp, errRoundTrip
+	}
+	if resp != nil {
+		resp.Body = trace.WrapUpstreamResponseBody(req.Context(), resp)
 	}
 	if t.packetOnly {
 		t.reporter.ObserveResponsePacketOnly(resp)
@@ -488,6 +500,55 @@ func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		t.reporter.ObserveResponse(resp)
 	}
 	return resp, nil
+}
+
+func snapshotHTTPBody(req *http.Request) ([]byte, string) {
+	if req == nil || req.Body == nil || req.Body == http.NoBody {
+		return nil, ""
+	}
+	if req.GetBody != nil {
+		body, errGetBody := req.GetBody()
+		if errGetBody == nil {
+			data, errRead := io.ReadAll(body)
+			_ = body.Close()
+			if errRead == nil {
+				return data, ""
+			}
+			return data, errRead.Error()
+		}
+	}
+	data, errRead := io.ReadAll(req.Body)
+	_ = req.Body.Close()
+	req.Body = io.NopCloser(bytes.NewReader(data))
+	if errRead != nil {
+		return data, errRead.Error()
+	}
+	return data, ""
+}
+
+func requestURL(req *http.Request) string {
+	if req == nil || req.URL == nil {
+		return ""
+	}
+	return req.URL.String()
+}
+
+func requestMethod(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	return req.Method
+}
+
+func requestHeaders(req *http.Request) http.Header {
+	if req == nil {
+		return nil
+	}
+	headers := make(http.Header, len(req.Header))
+	for key, values := range req.Header {
+		headers[key] = append([]string(nil), values...)
+	}
+	return headers
 }
 
 type usageTTFTReadCloser struct {

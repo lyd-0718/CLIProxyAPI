@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"path/filepath"
@@ -124,6 +125,37 @@ func TestRawHeaderPayloadIsWritten(t *testing.T) {
 	data, _ := recorder.ExportSession("raw")
 	if !strings.Contains(string(data), "keep-me") || len(detail.Events) != 1 {
 		t.Fatalf("raw payload not preserved: %s", data)
+	}
+	_ = recorder.Close()
+}
+
+func TestUpstreamResponseBodyIsCapturedAsRawPayload(t *testing.T) {
+	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir()})
+	if errNew != nil {
+		t.Fatal(errNew)
+	}
+	req, _ := http.NewRequest(http.MethodPost, "http://example.test/v1/chat/completions", nil)
+	state := NewState(recorder, req, nil)
+	ctx := contextWithState(state)
+	response := &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"choices":[{"delta":{"content":"ok"}}]}`)),
+	}
+	wrapped := WrapUpstreamResponseBody(ctx, response)
+	if _, errRead := io.ReadAll(wrapped); errRead != nil {
+		t.Fatal(errRead)
+	}
+	if errClose := wrapped.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	waitForEvents(t, recorder, state.sessionID, 1)
+	exported, errExport := recorder.ExportSession(state.sessionID)
+	if errExport != nil {
+		t.Fatal(errExport)
+	}
+	if !strings.Contains(string(exported), `"status":200`) || !strings.Contains(string(exported), `"content":"ok"`) {
+		t.Fatalf("upstream response was not recorded as raw JSON: %s", exported)
 	}
 	_ = recorder.Close()
 }
