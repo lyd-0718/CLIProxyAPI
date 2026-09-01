@@ -25,7 +25,7 @@ func (h *Handler) getTraceRecorder() *trace.Recorder {
 func (h *Handler) GetTraceSessions(c *gin.Context) {
 	recorder := h.getTraceRecorder()
 	if recorder == nil || !recorder.Enabled() {
-		c.JSON(http.StatusOK, gin.H{"sessions": []trace.SessionSummary{}, "enabled": false})
+		c.JSON(http.StatusOK, gin.H{"sessions": []trace.SessionSummary{}, "total": 0, "enabled": false})
 		return
 	}
 	limit, _ := strconv.Atoi(c.Query("limit"))
@@ -35,7 +35,12 @@ func (h *Handler) GetTraceSessions(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errList.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"sessions": sessions, "enabled": true})
+	total, errCount := recorder.CountSessionsFiltered(parseTraceFilter(c))
+	if errCount != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errCount.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"sessions": sessions, "total": total, "enabled": true})
 }
 
 // GetTraceOverview returns aggregate request and token metrics for the chosen
@@ -43,7 +48,7 @@ func (h *Handler) GetTraceSessions(c *gin.Context) {
 func (h *Handler) GetTraceOverview(c *gin.Context) {
 	recorder := h.getTraceRecorder()
 	if recorder == nil || !recorder.Enabled() {
-		c.JSON(http.StatusOK, trace.Overview{Enabled: false, Models: []trace.Breakdown{}, APIKeys: []trace.Breakdown{}, Sources: []trace.Breakdown{}, Timeline: []trace.TimelineBucket{}})
+		c.JSON(http.StatusOK, trace.Overview{Enabled: false, Models: []trace.Breakdown{}, APIKeys: []trace.Breakdown{}, Sources: []trace.Breakdown{}, Providers: []trace.Breakdown{}, Timeline: []trace.TimelineBucket{}})
 		return
 	}
 	overview, errOverview := recorder.GetOverview(parseTraceFilter(c))
@@ -58,7 +63,7 @@ func (h *Handler) GetTraceOverview(c *gin.Context) {
 func (h *Handler) GetTraceRequests(c *gin.Context) {
 	recorder := h.getTraceRecorder()
 	if recorder == nil || !recorder.Enabled() {
-		c.JSON(http.StatusOK, gin.H{"requests": []trace.TurnSummary{}, "enabled": false})
+		c.JSON(http.StatusOK, gin.H{"requests": []trace.TurnSummary{}, "total": 0, "enabled": false})
 		return
 	}
 	limit, _ := strconv.Atoi(c.Query("limit"))
@@ -68,15 +73,22 @@ func (h *Handler) GetTraceRequests(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errList.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"requests": requests, "enabled": true})
+	total, errCount := recorder.CountTurns(parseTraceFilter(c))
+	if errCount != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errCount.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"requests": requests, "total": total, "enabled": true})
 }
 
 func parseTraceFilter(c *gin.Context) trace.Filter {
 	filter := trace.Filter{
-		Query:  c.Query("q"),
-		Model:  c.Query("model"),
-		APIKey: c.Query("api_key"),
-		Source: c.Query("source"),
+		Query:    c.Query("q"),
+		Model:    c.Query("model"),
+		Provider: c.Query("provider"),
+		APIKey:   c.Query("api_key"),
+		Source:   c.Query("source"),
+		Outcome:  c.Query("outcome"),
 	}
 	if value := strings.TrimSpace(c.Query("from")); value != "" {
 		if parsed, errParse := time.Parse(time.RFC3339Nano, value); errParse == nil {

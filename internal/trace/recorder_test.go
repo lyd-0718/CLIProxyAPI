@@ -170,17 +170,17 @@ func waitForEvents(t *testing.T, recorder *Recorder, sessionID string, want int)
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		items, err := recorder.ListSessions(sessionID, 10, 0)
-		if err == nil && len(items) == 1 && items[0].EventCount >= int64(want) {
+		detail, err := recorder.GetSession(sessionID)
+		if err == nil && detail.EventCount >= int64(want) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	items, _ := recorder.ListSessions(sessionID, 10, 0)
-	if len(items) == 0 {
+	detail, err := recorder.GetSession(sessionID)
+	if err != nil {
 		t.Fatal("session was not indexed")
 	}
-	t.Fatalf("event count = %d, want at least %d", items[0].EventCount, want)
+	t.Fatalf("event count = %d, want at least %d", detail.EventCount, want)
 }
 
 func TestRawHeaderPayloadIsWritten(t *testing.T) {
@@ -421,8 +421,12 @@ func TestTraceAnalyticsListRequestsAndOverview(t *testing.T) {
 	if errRequests != nil {
 		t.Fatal(errRequests)
 	}
-	if len(requests) != 2 || requests[0].InputTokens != 10 || requests[0].CachedTokens != 3 {
+	if len(requests) != 2 || requests[0].InputTokens != 10 || requests[0].CachedTokens != 3 || !requests[0].TraceAvailable {
 		t.Fatalf("requests = %#v", requests)
+	}
+	totalRequests, errCountRequests := recorder.CountTurns(Filter{Model: "gpt-test"})
+	if errCountRequests != nil || totalRequests != 2 {
+		t.Fatalf("request count = %d, err = %v", totalRequests, errCountRequests)
 	}
 	overview, errOverview := recorder.GetOverview(Filter{From: now.Add(-time.Second), To: now.Add(3 * time.Minute)})
 	if errOverview != nil {
@@ -431,8 +435,52 @@ func TestTraceAnalyticsListRequestsAndOverview(t *testing.T) {
 	if overview.Sessions != 2 || overview.Turns != 2 || overview.Events != 6 || overview.InputTokens != 20 || overview.CachedTokens != 6 {
 		t.Fatalf("overview = %#v", overview)
 	}
-	if len(overview.Models) != 1 || overview.Models[0].Name != "gpt-test" || len(overview.APIKeys) != 2 || len(overview.Timeline) == 0 {
+	if len(overview.Models) != 1 || overview.Models[0].Name != "gpt-test" || len(overview.APIKeys) != 2 || len(overview.Providers) != 1 || len(overview.Timeline) == 0 {
 		t.Fatalf("overview breakdowns = %#v", overview)
+	}
+	_ = recorder.Close()
+}
+
+func TestLegacyKeeperRequestsStayOutOfSessionTraces(t *testing.T) {
+	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir()})
+	if errNew != nil {
+		t.Fatal(errNew)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	events := []Event{
+		{SchemaVersion: 1, EventID: "legacy-request", Timestamp: now, SessionID: "legacy-keeper-request-1", SessionSource: legacyKeeperSource, TurnID: "legacy-turn", RequestID: "legacy-request", Kind: "request.input", Payload: []byte(`{"model":"gpt-legacy"}`)},
+		{SchemaVersion: 1, EventID: "legacy-usage", Timestamp: now.Add(time.Second), SessionID: "legacy-keeper-request-1", SessionSource: legacyKeeperSource, TurnID: "legacy-turn", RequestID: "legacy-request", Kind: "usage", Payload: []byte(`{"model":"gpt-legacy","provider":"openai","input_tokens":12,"output_tokens":3,"total_tokens":15}`)},
+		{SchemaVersion: 1, EventID: "legacy-complete", Timestamp: now.Add(2 * time.Second), SessionID: "legacy-keeper-request-1", SessionSource: legacyKeeperSource, TurnID: "legacy-turn", RequestID: "legacy-request", Kind: "turn.completed", Payload: []byte(`{"status":200}`)},
+	}
+	for _, event := range events {
+		if err := recorder.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitForEvents(t, recorder, "legacy-keeper-request-1", len(events))
+
+	requests, errRequests := recorder.ListTurns(Filter{}, 10, 0)
+	if errRequests != nil || len(requests) != 1 || requests[0].TraceAvailable {
+		t.Fatalf("legacy requests = %#v, err = %v", requests, errRequests)
+	}
+	requestCount, errRequestCount := recorder.CountTurns(Filter{})
+	if errRequestCount != nil || requestCount != 1 {
+		t.Fatalf("legacy request count = %d, err = %v", requestCount, errRequestCount)
+	}
+	sessions, errSessions := recorder.ListSessionsFiltered(Filter{}, 10, 0)
+	if errSessions != nil || len(sessions) != 0 {
+		t.Fatalf("legacy sessions = %#v, err = %v", sessions, errSessions)
+	}
+	sessionCount, errSessionCount := recorder.CountSessionsFiltered(Filter{})
+	if errSessionCount != nil || sessionCount != 0 {
+		t.Fatalf("legacy session count = %d, err = %v", sessionCount, errSessionCount)
+	}
+	overview, errOverview := recorder.GetOverview(Filter{})
+	if errOverview != nil {
+		t.Fatal(errOverview)
+	}
+	if overview.Turns != 1 || overview.TotalTokens != 15 || overview.Sessions != 0 || overview.Events != 0 {
+		t.Fatalf("legacy overview = %#v", overview)
 	}
 	_ = recorder.Close()
 }
@@ -549,22 +597,22 @@ func TestOpenAIAndAnthropicProtocolTraces(t *testing.T) {
 		name        string
 		path        string
 		model       string
-		requestBody  string
-		outputBody   string
-		wantOutput   string
+		requestBody string
+		outputBody  string
+		wantOutput  string
 	}{
 		{
-			name:  "openai non-stream",
-			path:  "/v1/chat/completions",
-			model: "gpt-trace-nonstream",
+			name:        "openai non-stream",
+			path:        "/v1/chat/completions",
+			model:       "gpt-trace-nonstream",
 			requestBody: `{"model":"gpt-trace-nonstream","messages":[{"role":"user","content":"lookup"},{"role":"tool","tool_call_id":"call-openai","content":"result"}]}`,
 			outputBody:  `{"id":"chatcmpl-trace","object":"chat.completion","model":"gpt-trace-nonstream","choices":[{"index":0,"message":{"role":"assistant","content":"answer","reasoning_content":"think","tool_calls":[{"id":"call-openai","type":"function","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`,
 			wantOutput:  "answer",
 		},
 		{
-			name:  "openai stream",
-			path:  "/v1/chat/completions",
-			model: "gpt-trace-stream",
+			name:        "openai stream",
+			path:        "/v1/chat/completions",
+			model:       "gpt-trace-stream",
 			requestBody: `{"model":"gpt-trace-stream","messages":[{"role":"user","content":"lookup"},{"role":"tool","tool_call_id":"call-openai-stream","content":"result"}]}`,
 			outputBody: strings.Join([]string{
 				`data: {"choices":[{"delta":{"reasoning_content":"think"}}]}`,
@@ -575,17 +623,17 @@ func TestOpenAIAndAnthropicProtocolTraces(t *testing.T) {
 			wantOutput: "answer",
 		},
 		{
-			name:  "anthropic non-stream",
-			path:  "/v1/messages",
-			model: "claude-trace-nonstream",
+			name:        "anthropic non-stream",
+			path:        "/v1/messages",
+			model:       "claude-trace-nonstream",
 			requestBody: `{"model":"claude-trace-nonstream","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-anthropic","content":"result"}]}]}`,
 			outputBody:  `{"id":"msg-trace","type":"message","role":"assistant","model":"claude-trace-nonstream","content":[{"type":"thinking","thinking":"think"},{"type":"tool_use","id":"call-anthropic","name":"lookup","input":{}}],"stop_reason":"tool_use"}`,
 			wantOutput:  "call-anthropic",
 		},
 		{
-			name:  "anthropic stream",
-			path:  "/v1/messages",
-			model: "claude-trace-stream",
+			name:        "anthropic stream",
+			path:        "/v1/messages",
+			model:       "claude-trace-stream",
 			requestBody: `{"model":"claude-trace-stream","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-anthropic-stream","content":"result"}]}]}`,
 			outputBody: strings.Join([]string{
 				`event: content_block_start`,

@@ -8,13 +8,17 @@ import (
 // Filter limits analytics and request queries to a common time and identity
 // window. Empty string fields are intentionally treated as no filter.
 type Filter struct {
-	From   time.Time
-	To     time.Time
-	Query  string
-	Model  string
-	APIKey string
-	Source string
+	From     time.Time
+	To       time.Time
+	Query    string
+	Model    string
+	Provider string
+	APIKey   string
+	Source   string
+	Outcome  string
 }
+
+const legacyKeeperSource = "legacy-keeper"
 
 // TurnSummary is the compact request/response view used by the management
 // center's Requests tab.
@@ -39,6 +43,7 @@ type TurnSummary struct {
 	TTFTMS          int64     `json:"ttft_ms"`
 	Failed          bool      `json:"failed"`
 	Incomplete      bool      `json:"incomplete"`
+	TraceAvailable  bool      `json:"trace_available"`
 }
 
 // Breakdown is a token and request aggregate grouped by one dimension.
@@ -56,17 +61,17 @@ type Breakdown struct {
 
 // TimelineBucket is an hourly UTC request bucket for a compact activity chart.
 type TimelineBucket struct {
-	At         time.Time `json:"at"`
-	Turns      int64     `json:"turns"`
-	Failed     int64     `json:"failed"`
-	TotalTokens int64    `json:"total_tokens"`
+	At          time.Time `json:"at"`
+	Turns       int64     `json:"turns"`
+	Failed      int64     `json:"failed"`
+	TotalTokens int64     `json:"total_tokens"`
 }
 
 // Overview is the aggregate data for a selected time window.
 type Overview struct {
 	Enabled         bool             `json:"enabled"`
-	From            time.Time       `json:"from,omitempty"`
-	To              time.Time       `json:"to,omitempty"`
+	From            time.Time        `json:"from,omitempty"`
+	To              time.Time        `json:"to,omitempty"`
 	Sessions        int64            `json:"sessions"`
 	Turns           int64            `json:"turns"`
 	Events          int64            `json:"events"`
@@ -82,6 +87,7 @@ type Overview struct {
 	Models          []Breakdown      `json:"models"`
 	APIKeys         []Breakdown      `json:"api_keys"`
 	Sources         []Breakdown      `json:"sources"`
+	Providers       []Breakdown      `json:"providers"`
 	Timeline        []TimelineBucket `json:"timeline"`
 }
 
@@ -110,25 +116,43 @@ func (r *Recorder) ListTurns(filter Filter, limit, offset int) ([]TurnSummary, e
 	return result, rows.Err()
 }
 
+// CountTurns returns the total request count for a filtered request browser.
+func (r *Recorder) CountTurns(filter Filter) (int64, error) {
+	if !r.Enabled() {
+		return 0, nil
+	}
+	args, where := turnFilterSQL(filter)
+	var total int64
+	if err := r.db.QueryRow(`SELECT COUNT(*) FROM turns t JOIN sessions s ON s.session_id=t.session_id `+where, args...).Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
 // GetOverview computes aggregate metrics from the SQLite index. Trace bodies
 // remain in NDJSON and are never loaded for this operation.
 func (r *Recorder) GetOverview(filter Filter) (Overview, error) {
 	if !r.Enabled() {
-		return Overview{Enabled: false, Models: []Breakdown{}, APIKeys: []Breakdown{}, Sources: []Breakdown{}, Timeline: []TimelineBucket{}}, nil
+		return Overview{Enabled: false, Models: []Breakdown{}, APIKeys: []Breakdown{}, Sources: []Breakdown{}, Providers: []Breakdown{}, Timeline: []TimelineBucket{}}, nil
 	}
 	args, where := turnFilterSQL(filter)
 	var out Overview
 	out.Enabled = true
 	out.From = filter.From
 	out.To = filter.To
-	if err := r.db.QueryRow(`SELECT COUNT(DISTINCT t.session_id),COUNT(*),COALESCE(SUM(t.failed),0),COALESCE(SUM(t.incomplete),0),
+	if err := r.db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(t.failed),0),COALESCE(SUM(t.incomplete),0),
 		COALESCE(SUM(t.input_tokens),0),COALESCE(SUM(t.output_tokens),0),COALESCE(SUM(t.reasoning_tokens),0),COALESCE(SUM(t.cached_tokens),0),COALESCE(SUM(t.total_tokens),0),
 		COALESCE(AVG(NULLIF(t.latency_ms,0)),0),COALESCE(AVG(NULLIF(t.ttft_ms,0)),0)
-		FROM turns t JOIN sessions s ON s.session_id=t.session_id `+where, args...).Scan(&out.Sessions, &out.Turns, &out.Failed, &out.Incomplete,
+		FROM turns t JOIN sessions s ON s.session_id=t.session_id `+where, args...).Scan(&out.Turns, &out.Failed, &out.Incomplete,
 		&out.InputTokens, &out.OutputTokens, &out.ReasoningTokens, &out.CachedTokens, &out.TotalTokens, &out.AvgLatencyMS, &out.AvgTTFTMS); err != nil {
 		return Overview{}, err
 	}
-	if err := r.db.QueryRow(`SELECT COUNT(*) FROM events e JOIN turns t ON t.turn_id=e.turn_id JOIN sessions s ON s.session_id=t.session_id `+where, args...).Scan(&out.Events); err != nil {
+	realTraceWhere := where + " AND s.session_source <> ?"
+	realTraceArgs := append(append([]any{}, args...), legacyKeeperSource)
+	if err := r.db.QueryRow(`SELECT COUNT(DISTINCT t.session_id) FROM turns t JOIN sessions s ON s.session_id=t.session_id `+realTraceWhere, realTraceArgs...).Scan(&out.Sessions); err != nil {
+		return Overview{}, err
+	}
+	if err := r.db.QueryRow(`SELECT COUNT(*) FROM events e JOIN turns t ON t.turn_id=e.turn_id JOIN sessions s ON s.session_id=t.session_id `+realTraceWhere, realTraceArgs...).Scan(&out.Events); err != nil {
 		return Overview{}, err
 	}
 	var err error
@@ -139,6 +163,9 @@ func (r *Recorder) GetOverview(filter Filter) (Overview, error) {
 		return Overview{}, err
 	}
 	if out.Sources, err = r.breakdown(filter, where, args, "session_source"); err != nil {
+		return Overview{}, err
+	}
+	if out.Providers, err = r.breakdown(filter, where, args, "provider"); err != nil {
 		return Overview{}, err
 	}
 	if out.Timeline, err = r.timeline(filter, where, args); err != nil {
@@ -167,6 +194,9 @@ func turnFilterSQL(filter Filter) ([]any, string) {
 	model := strings.TrimSpace(filter.Model)
 	conditions = append(conditions, "(? = '' OR t.model LIKE ?)")
 	args = append(args, model, "%"+model+"%")
+	provider := strings.TrimSpace(filter.Provider)
+	conditions = append(conditions, "(? = '' OR t.provider LIKE ?)")
+	args = append(args, provider, "%"+provider+"%")
 	apiKey := strings.TrimSpace(filter.APIKey)
 	conditions = append(conditions, "(? = '' OR t.api_key LIKE ?)")
 	args = append(args, apiKey, "%"+apiKey+"%")
@@ -180,6 +210,14 @@ func turnFilterSQL(filter Filter) ([]any, string) {
 	if !filter.To.IsZero() {
 		conditions = append(conditions, "t.last_at <= ?")
 		args = append(args, filter.To.UTC().Format(time.RFC3339Nano))
+	}
+	switch strings.ToLower(strings.TrimSpace(filter.Outcome)) {
+	case "failed":
+		conditions = append(conditions, "t.failed = 1")
+	case "incomplete":
+		conditions = append(conditions, "t.incomplete = 1")
+	case "complete":
+		conditions = append(conditions, "t.failed = 0 AND t.incomplete = 0")
 	}
 	return args, "WHERE " + strings.Join(conditions, " AND ")
 }
@@ -202,6 +240,7 @@ func scanTurn(row scanner) (TurnSummary, error) {
 	item.LastAt, _ = time.Parse(time.RFC3339Nano, last)
 	item.Failed = failed != 0
 	item.Incomplete = incomplete != 0
+	item.TraceAvailable = item.SessionSource != legacyKeeperSource
 	return item, nil
 }
 

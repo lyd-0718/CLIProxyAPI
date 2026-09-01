@@ -43,28 +43,9 @@ func (r *Recorder) ListSessionsFiltered(filter Filter, limit, offset int) ([]Ses
 		return []SessionSummary{}, nil
 	}
 	limit, offset = normalizePage(limit, offset, 100)
-	query := strings.TrimSpace(filter.Query)
-	conditions := []string{"(? = '' OR s.session_id LIKE ? OR s.session_source LIKE ?)"}
-	args := []any{query, "%" + query + "%", "%" + query + "%"}
-	model := strings.TrimSpace(filter.Model)
-	conditions = append(conditions, "(? = '' OR EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.session_id AND t.model LIKE ?))")
-	args = append(args, model, "%"+model+"%")
-	apiKey := strings.TrimSpace(filter.APIKey)
-	conditions = append(conditions, "(? = '' OR EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.session_id AND t.api_key LIKE ?))")
-	args = append(args, apiKey, "%"+apiKey+"%")
-	source := strings.TrimSpace(filter.Source)
-	conditions = append(conditions, "(? = '' OR s.session_source LIKE ?)")
-	args = append(args, source, "%"+source+"%")
-	if !filter.From.IsZero() {
-		conditions = append(conditions, "s.last_at >= ?")
-		args = append(args, filter.From.UTC().Format(time.RFC3339Nano))
-	}
-	if !filter.To.IsZero() {
-		conditions = append(conditions, "s.last_at <= ?")
-		args = append(args, filter.To.UTC().Format(time.RFC3339Nano))
-	}
+	args, where := sessionFilterSQL(filter)
 	rows, errQuery := r.db.Query(`SELECT s.session_id,s.session_source,s.first_at,s.last_at,s.turn_count,s.event_count,s.bytes,s.incomplete,s.file_path
-		FROM sessions s WHERE `+strings.Join(conditions, " AND ")+`
+		FROM sessions s `+where+`
 		ORDER BY s.last_at DESC LIMIT ? OFFSET ?`, append(args, limit, offset)...)
 	if errQuery != nil {
 		return nil, errQuery
@@ -84,6 +65,54 @@ func (r *Recorder) ListSessionsFiltered(filter Filter, limit, offset int) ([]Ses
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+// CountSessionsFiltered returns the number of real, non-imported sessions.
+func (r *Recorder) CountSessionsFiltered(filter Filter) (int64, error) {
+	if !r.Enabled() {
+		return 0, nil
+	}
+	args, where := sessionFilterSQL(filter)
+	var total int64
+	if err := r.db.QueryRow(`SELECT COUNT(*) FROM sessions s `+where, args...).Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+func sessionFilterSQL(filter Filter) ([]any, string) {
+	query := strings.TrimSpace(filter.Query)
+	conditions := []string{"s.session_source <> ?", "(? = '' OR s.session_id LIKE ? OR s.session_source LIKE ?)"}
+	args := []any{legacyKeeperSource, query, "%" + query + "%", "%" + query + "%"}
+	model := strings.TrimSpace(filter.Model)
+	conditions = append(conditions, "(? = '' OR EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.session_id AND t.model LIKE ?))")
+	args = append(args, model, "%"+model+"%")
+	provider := strings.TrimSpace(filter.Provider)
+	conditions = append(conditions, "(? = '' OR EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.session_id AND t.provider LIKE ?))")
+	args = append(args, provider, "%"+provider+"%")
+	apiKey := strings.TrimSpace(filter.APIKey)
+	conditions = append(conditions, "(? = '' OR EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.session_id AND t.api_key LIKE ?))")
+	args = append(args, apiKey, "%"+apiKey+"%")
+	source := strings.TrimSpace(filter.Source)
+	conditions = append(conditions, "(? = '' OR s.session_source LIKE ?)")
+	args = append(args, source, "%"+source+"%")
+	if !filter.From.IsZero() {
+		conditions = append(conditions, "s.last_at >= ?")
+		args = append(args, filter.From.UTC().Format(time.RFC3339Nano))
+	}
+	if !filter.To.IsZero() {
+		conditions = append(conditions, "s.last_at <= ?")
+		args = append(args, filter.To.UTC().Format(time.RFC3339Nano))
+	}
+	switch strings.ToLower(strings.TrimSpace(filter.Outcome)) {
+	case "failed":
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.session_id AND t.failed=1)")
+	case "incomplete":
+		conditions = append(conditions, "s.incomplete=1")
+	case "complete":
+		conditions = append(conditions, "s.incomplete=0 AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.session_id AND t.failed=1)")
+	}
+	return args, "WHERE " + strings.Join(conditions, " AND ")
 }
 
 // GetSession returns a Session summary and all available ordered events.
