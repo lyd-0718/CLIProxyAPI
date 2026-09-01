@@ -14,11 +14,12 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// Middleware starts a Trace for each public model API request. It sits before
-// the existing request logger so both systems observe the same bytes.
+// Middleware starts a Trace for model invocations only. Catalog, token-count,
+// retrieve, and control-plane routes are ignored so request logs record
+// success and failure of actual model calls.
 func Middleware(recorder *Recorder) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if recorder == nil || !recorder.Enabled() || c == nil || c.Request == nil || !isTraceablePath(c.Request.URL.Path) {
+		if recorder == nil || !recorder.Enabled() || c == nil || c.Request == nil || !isTraceableRequest(c.Request.Method, c.Request.URL.Path) {
 			c.Next()
 			return
 		}
@@ -55,13 +56,50 @@ func readAndRestoreBody(req *http.Request) ([]byte, error) {
 	return body, errRead
 }
 
-func isTraceablePath(path string) bool {
-	for _, prefix := range []string{"/v1", "/v1beta", "/openai/v1", "/backend-api/codex"} {
-		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+func isTraceableRequest(method, path string) bool {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	path = strings.ToLower(strings.TrimSuffix(path, "/"))
+	if method == http.MethodPost {
+		switch path {
+		case "/v1/chat/completions",
+			"/v1/completions",
+			"/v1/messages",
+			"/v1/responses",
+			"/v1/responses/compact",
+			"/v1/images/generations",
+			"/v1/images/edits",
+			"/v1/videos",
+			"/v1/videos/generations",
+			"/v1/videos/edits",
+			"/v1/videos/extensions",
+			"/openai/v1/videos",
+			"/backend-api/codex/responses",
+			"/backend-api/codex/responses/compact",
+			"/v1beta/interactions",
+			"/v1/live",
+			"/v1/realtime",
+			"/v1/realtime/calls":
 			return true
 		}
+		return isGeminiGeneratePath(path)
+	}
+	if method == http.MethodGet {
+		switch path {
+		case "/v1/responses", "/backend-api/codex/responses", "/v1/realtime":
+			return true
+		}
+		return isGeminiGeneratePath(path)
 	}
 	return false
+}
+
+func isGeminiGeneratePath(path string) bool {
+	const prefix = "/v1beta/models/"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	action := path[len(prefix):]
+	return strings.Contains(action, ":generate") || strings.Contains(action, ":streamgenerate")
 }
 
 // ResponseWriter captures every downstream response byte after it has been
