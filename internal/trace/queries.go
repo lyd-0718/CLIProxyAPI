@@ -297,16 +297,16 @@ func (r *Recorder) Stats() (map[string]any, error) {
 	writeErrors := r.writeErrors
 	r.errorMu.RUnlock()
 	stats := map[string]any{
-		"enabled":          true,
-		"root_dir":         r.rootDir,
-		"sessions":         sessions,
-		"events":           events,
-		"max_file_bytes":   r.maxFileBytes,
-		"retention_days":   r.retentionDays,
-		"metadata_days":    r.metadataDays,
-		"max_bytes":        r.maxBytes,
-		"cleanup_enabled":  r.cleanupEnabled,
-		"write_errors":     writeErrors,
+		"enabled":         true,
+		"root_dir":        r.rootDir,
+		"sessions":        sessions,
+		"events":          events,
+		"max_file_bytes":  r.maxFileBytes,
+		"retention_days":  r.retentionDays,
+		"metadata_days":   r.metadataDays,
+		"max_bytes":       r.maxBytes,
+		"cleanup_enabled": r.cleanupEnabled,
+		"write_errors":    writeErrors,
 	}
 	if lastError != "" {
 		stats["last_write_error"] = lastError

@@ -490,23 +490,31 @@ func TestRequestSemanticEventsAreRecorded(t *testing.T) {
 	if errNew != nil {
 		t.Fatal(errNew)
 	}
-	req, _ := http.NewRequest(http.MethodPost, "http://example.test/v1/messages", bytes.NewBufferString(`{"messages":[{"role":"assistant","thinking":"reason"},{"role":"user","tool_result":{"content":"done"}}]}`))
-	state := NewState(recorder, req, []byte(`{"messages":[{"role":"assistant","thinking":"reason"},{"role":"user","tool_result":{"content":"done"}}]}`))
+	history := []byte(`{"messages":[{"role":"assistant","thinking":"old-history"},{"role":"user","tool_result":{"content":"old-result"}},{"role":"user","content":"now"}]}`)
+	req, _ := http.NewRequest(http.MethodPost, "http://example.test/v1/messages", bytes.NewBuffer(history))
+	state := NewState(recorder, req, history)
 	if err := state.Begin(); err != nil {
 		t.Fatal(err)
 	}
-	waitForEvents(t, recorder, state.sessionID, 3)
+	state.Finish(http.StatusOK, nil)
+	waitForEvents(t, recorder, state.sessionID, 2)
 	detail, errGet := recorder.GetSession(state.sessionID)
 	if errGet != nil {
 		t.Fatal(errGet)
 	}
-	var reasoning, toolResult bool
+	var reasoning, toolResult, requestInput int
 	for _, event := range detail.Events {
-		reasoning = reasoning || event.Kind == "reasoning"
-		toolResult = toolResult || event.Kind == "tool.result"
+		switch event.Kind {
+		case "reasoning":
+			reasoning++
+		case "tool.result":
+			toolResult++
+		case "request.input":
+			requestInput++
+		}
 	}
-	if !reasoning || !toolResult {
-		t.Fatalf("semantic events missing: reasoning=%v tool_result=%v", reasoning, toolResult)
+	if requestInput != 1 || reasoning != 0 || toolResult != 0 {
+		t.Fatalf("history expanded into timeline: request.input=%d reasoning=%d tool.result=%d events=%d", requestInput, reasoning, toolResult, len(detail.Events))
 	}
 	_ = recorder.Close()
 }
@@ -517,11 +525,13 @@ func TestStandardSemanticObjectEventsAreRecorded(t *testing.T) {
 		t.Fatal(errNew)
 	}
 	req, _ := http.NewRequest(http.MethodPost, "http://example.test/v1/messages", nil)
-	state := NewState(recorder, req, []byte(`{"content":[{"type":"thinking","thinking":"reason"},{"type":"tool_use","id":"call-1","name":"search"}],"messages":[{"role":"tool","tool_call_id":"call-1","content":"done"}]}`))
+	state := NewState(recorder, req, []byte(`{"messages":[{"role":"user","content":"inspect"}]}`))
 	if err := state.Begin(); err != nil {
 		t.Fatal(err)
 	}
-	waitForEvents(t, recorder, state.sessionID, 4)
+	state.AppendDownstreamChunk([]byte(`{"content":[{"type":"thinking","thinking":"reason"},{"type":"tool_use","id":"call-1","name":"search"},{"type":"tool_result","tool_use_id":"call-1","content":"done"}]}`))
+	state.Finish(http.StatusOK, nil)
+	waitForEvents(t, recorder, state.sessionID, 6)
 	detail, errGet := recorder.GetSession(state.sessionID)
 	if errGet != nil {
 		t.Fatal(errGet)
@@ -570,7 +580,7 @@ func TestStreamingSemanticEventsAreRecordedFromSSE(t *testing.T) {
 	}, "\n")
 	state.AppendDownstreamChunk([]byte(stream))
 	state.Finish(http.StatusOK, http.Header{"Content-Type": {"text/event-stream"}})
-	waitForEvents(t, recorder, state.sessionID, 7)
+	waitForEvents(t, recorder, state.sessionID, 6)
 	detail, errGet := recorder.GetSession(state.sessionID)
 	if errGet != nil {
 		t.Fatal(errGet)
@@ -588,6 +598,49 @@ func TestStreamingSemanticEventsAreRecordedFromSSE(t *testing.T) {
 	}
 	if !reasoning || !toolCall || !toolResult {
 		t.Fatalf("stream semantic events missing: reasoning=%v tool_call=%v tool_result=%v", reasoning, toolCall, toolResult)
+	}
+	_ = recorder.Close()
+}
+
+func TestStreamChunksAreNotStoredAsUpstreamResponses(t *testing.T) {
+	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir()})
+	if errNew != nil {
+		t.Fatal(errNew)
+	}
+	req, _ := http.NewRequest(http.MethodPost, "http://example.test/v1/messages", nil)
+	state := NewState(recorder, req, []byte(`{"messages":[{"role":"user","content":"hi"}]}`))
+	ctx := contextWithState(state)
+	if err := state.Begin(); err != nil {
+		t.Fatal(err)
+	}
+	RecordUpstreamRequestForContext(ctx, UpstreamRequest{URL: "https://upstream.test", Method: http.MethodPost, Body: []byte(`{"model":"kimi"}`)})
+	RecordUpstreamRequestForContext(ctx, UpstreamRequest{URL: "https://upstream.test", Method: http.MethodPost, Body: []byte(`{"model":"kimi"}`)})
+	RecordUpstreamResponseForContext(ctx, UpstreamResponse{Status: 200, Headers: http.Header{"Content-Type": {"text/event-stream"}}})
+	for i := 0; i < 80; i++ {
+		RecordUpstreamResponseForContext(ctx, UpstreamResponse{Body: []byte(fmt.Sprintf(`data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"%d"}}`, i))})
+	}
+	RecordUpstreamResponseForContext(ctx, UpstreamResponse{Status: 200, Headers: http.Header{"Content-Type": {"text/event-stream"}}, Body: []byte("data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"thinking\",\"thinking\":\"done\"}}\n")})
+	state.Finish(http.StatusOK, nil)
+	waitForEvents(t, recorder, state.sessionID, 5)
+	detail, errGet := recorder.GetSession(state.sessionID)
+	if errGet != nil {
+		t.Fatal(errGet)
+	}
+	counts := map[string]int{}
+	for _, event := range detail.Events {
+		counts[event.Kind]++
+	}
+	if counts["upstream.request"] != 1 {
+		t.Fatalf("upstream.request = %d, want 1 duplicate collapsed", counts["upstream.request"])
+	}
+	if counts["upstream.response"] != 2 {
+		t.Fatalf("upstream.response = %d, want status + final body only", counts["upstream.response"])
+	}
+	if counts["stream.chunk"] != 0 {
+		t.Fatalf("stream.chunk = %d, want 0 when record-stream-chunks is off", counts["stream.chunk"])
+	}
+	if counts["reasoning"] > 2 {
+		t.Fatalf("reasoning = %d, want coalesced complete blocks not one event per delta", counts["reasoning"])
 	}
 	_ = recorder.Close()
 }
@@ -681,7 +734,7 @@ func TestOpenAIAndAnthropicProtocolTraces(t *testing.T) {
 			})
 			state.Finish(http.StatusOK, http.Header{"Content-Type": {"application/json"}})
 
-			waitForEvents(t, recorder, state.sessionID, 7)
+			waitForEvents(t, recorder, state.sessionID, 6)
 			detail, errGet := recorder.GetSession(state.sessionID)
 			if errGet != nil {
 				t.Fatal(errGet)
@@ -690,7 +743,7 @@ func TestOpenAIAndAnthropicProtocolTraces(t *testing.T) {
 			for _, event := range detail.Events {
 				seen[event.Kind] = true
 			}
-			for _, kind := range []string{"request.input", "tool.result", "reasoning", "tool.call", "usage", "model.output", "turn.completed"} {
+			for _, kind := range []string{"request.input", "reasoning", "tool.call", "usage", "model.output", "turn.completed"} {
 				if !seen[kind] {
 					t.Fatalf("missing %s event in %s trace", kind, test.name)
 				}
