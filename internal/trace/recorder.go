@@ -39,6 +39,7 @@ type Config struct {
 	MetadataDays       int
 	MaxBytes           int64
 	RecordStreamChunks bool
+	CleanupEnabled     bool
 }
 
 // Recorder persists trace events and maintains their query index.
@@ -50,6 +51,7 @@ type Recorder struct {
 	metadataDays       int
 	maxBytes           int64
 	recordStreamChunks bool
+	cleanupEnabled     bool
 
 	queue       chan queuedEvent
 	stop        chan struct{}
@@ -143,7 +145,9 @@ func NewRecorder(cfg Config) (*Recorder, error) {
 			latency_ms INTEGER NOT NULL DEFAULT 0,
 			ttft_ms INTEGER NOT NULL DEFAULT 0,
 			failed INTEGER NOT NULL DEFAULT 0,
-			incomplete INTEGER NOT NULL DEFAULT 0
+			incomplete INTEGER NOT NULL DEFAULT 0,
+			reasoning_effort TEXT NOT NULL DEFAULT '',
+			failure TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE TABLE IF NOT EXISTS events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -170,6 +174,10 @@ func NewRecorder(cfg Config) (*Recorder, error) {
 			return nil, fmt.Errorf("initialize trace index: %w", errExec)
 		}
 	}
+	if errColumns := ensureTurnColumns(db); errColumns != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate trace index: %w", errColumns)
+	}
 	r := &Recorder{
 		rootDir:            cfg.RootDir,
 		db:                 db,
@@ -178,6 +186,7 @@ func NewRecorder(cfg Config) (*Recorder, error) {
 		metadataDays:       cfg.MetadataDays,
 		maxBytes:           cfg.MaxBytes,
 		recordStreamChunks: cfg.RecordStreamChunks,
+		cleanupEnabled:     cfg.CleanupEnabled,
 		queue:              make(chan queuedEvent, queueSize),
 		stop:               make(chan struct{}),
 		done:               make(chan struct{}),
@@ -254,6 +263,9 @@ func (r *Recorder) cleanupLoop() {
 	for {
 		select {
 		case <-ticker.C:
+			if r == nil || !r.cleanupEnabled {
+				continue
+			}
 			if errCleanup := r.Cleanup(time.Now()); errCleanup != nil {
 				log.WithError(errCleanup).Warn("trace: cleanup failed")
 			}
@@ -296,8 +308,10 @@ func (r *Recorder) writeEvent(event Event) error {
 	if errIndex := r.indexEvent(event, filepath.ToSlash(relativePath(r.rootDir, file.path)), offset, int64(n)); errIndex != nil {
 		return errIndex
 	}
-	if errLimit := r.enforceMaxBytesLocked(file.path); errLimit != nil {
-		return errLimit
+	if r.cleanupEnabled {
+		if errLimit := r.enforceMaxBytesLocked(file.path); errLimit != nil {
+			return errLimit
+		}
 	}
 	return nil
 }
@@ -636,6 +650,21 @@ func (r *Recorder) MaxBytes() int64 {
 		return 0
 	}
 	return r.maxBytes
+}
+
+func ensureTurnColumns(db *sql.DB) error {
+	if db == nil {
+		return nil
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE turns ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE turns ADD COLUMN failure TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.Exec(stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+			return err
+		}
+	}
+	return nil
 }
 
 func sortEvents(events []Event) {

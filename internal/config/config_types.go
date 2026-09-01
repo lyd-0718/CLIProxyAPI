@@ -223,16 +223,20 @@ type TraceConfig struct {
 	MetadataDays       int    `yaml:"metadata-days,omitempty" json:"metadata-days,omitempty"`
 	MaxBytes           int64  `yaml:"max-bytes,omitempty" json:"max-bytes,omitempty"`
 	RecordStreamChunks bool   `yaml:"record-stream-chunks,omitempty" json:"record-stream-chunks,omitempty"`
+	// CleanupEnabled runs time/size retention. The cleanup implementation stays
+	// in the recorder; this flag only decides whether it is invoked automatically.
+	CleanupEnabled bool `yaml:"cleanup-enabled" json:"cleanup-enabled"`
 }
 
 // DefaultTraceConfig returns the built-in trace defaults.
 func DefaultTraceConfig() TraceConfig {
 	return TraceConfig{
-		Enabled:       true,
-		MaxFileBytes:  256 << 20,
-		RetentionDays: 30,
-		MetadataDays:  180,
-		MaxBytes:      10 << 30,
+		Enabled:        true,
+		MaxFileBytes:   256 << 20,
+		RetentionDays:  30,
+		MetadataDays:   180,
+		MaxBytes:       10 << 30,
+		CleanupEnabled: false,
 	}
 }
 

@@ -136,6 +136,9 @@ trace:
   metadata-days: 180
   max-bytes: 10737418240
   record-stream-chunks: false
+  # Automatic time/size cleanup is off until the retention policy is corrected.
+  # The cleanup code remains; set true to resume deleting old NDJSON/index rows.
+  cleanup-enabled: false
 
 # How long (in seconds) usage queue items are retained in memory for the Management API.
 # The local Redis RESP usage output is disabled.

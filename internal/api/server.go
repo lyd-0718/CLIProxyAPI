@@ -284,6 +284,7 @@ func newTraceRecorder(cfg *config.Config, configFilePath string) *trace.Recorder
 		MetadataDays:       cfg.Trace.MetadataDays,
 		MaxBytes:           cfg.Trace.MaxBytes,
 		RecordStreamChunks: cfg.Trace.RecordStreamChunks,
+		CleanupEnabled:     cfg.Trace.CleanupEnabled,
 	})
 	if errNew != nil {
 		log.WithError(errNew).Warn("trace recorder disabled")

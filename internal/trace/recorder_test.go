@@ -709,7 +709,7 @@ func TestOpenAIAndAnthropicProtocolTraces(t *testing.T) {
 }
 
 func TestRecorderEnforcesMaxBytesForFinalizedFiles(t *testing.T) {
-	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir(), MaxFileBytes: 256, MaxBytes: 900})
+	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir(), MaxFileBytes: 256, MaxBytes: 900, CleanupEnabled: true})
 	if errNew != nil {
 		t.Fatal(errNew)
 	}
@@ -734,6 +734,71 @@ func TestRecorderEnforcesMaxBytesForFinalizedFiles(t *testing.T) {
 	})
 	if total > recorder.MaxBytes() {
 		t.Fatalf("trace body bytes = %d, max = %d", total, recorder.MaxBytes())
+	}
+	_ = recorder.Close()
+}
+
+func TestRecorderSkipsMaxBytesWhenCleanupDisabled(t *testing.T) {
+	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir(), MaxFileBytes: 256, MaxBytes: 900})
+	if errNew != nil {
+		t.Fatal(errNew)
+	}
+	for i := 0; i < 24; i++ {
+		if err := recorder.Append(Event{SchemaVersion: 1, EventID: fmt.Sprintf("keep-%d", i), Timestamp: time.Now(), SessionID: "keep", SessionSource: "single-request", TurnID: fmt.Sprintf("turn-%d", i), Kind: "stream.chunk", Payload: []byte(`{"raw":"012345678901234567890123456789"}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := recorder.RootDir()
+	maxBytes := recorder.MaxBytes()
+	if errClose := recorder.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	var total int64
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err == nil && entry != nil && !entry.IsDir() && strings.HasSuffix(path, ".ndjson") {
+			if info, statErr := entry.Info(); statErr == nil {
+				total += info.Size()
+			}
+		}
+		return nil
+	})
+	if total <= maxBytes {
+		t.Fatalf("cleanup disabled should keep bodies over max bytes: total=%d max=%d", total, maxBytes)
+	}
+}
+
+func TestTurnIndexUsesLastOutcomeAndReasoning(t *testing.T) {
+	recorder, errNew := NewRecorder(Config{Enabled: true, RootDir: t.TempDir()})
+	if errNew != nil {
+		t.Fatal(errNew)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	events := []Event{
+		{SchemaVersion: 1, EventID: "req", Timestamp: now, SessionID: "session-retry", SessionSource: "explicit", TurnID: "turn-retry", RequestID: "req-retry", Kind: "request.input", Payload: []byte(`{"model":"kimi-k3"}`)},
+		{SchemaVersion: 1, EventID: "usage-fail", Timestamp: now.Add(time.Second), SessionID: "session-retry", SessionSource: "explicit", TurnID: "turn-retry", RequestID: "req-retry", Kind: "usage", Payload: []byte(`{"model":"kimi-k3","provider":"claude","reasoning_effort":"max","failed":true,"failure":{"StatusCode":403,"Body":"{\"error\":{\"type\":\"permission_error\",\"message\":\"weekly usage limit\"}}"}}`)},
+		{SchemaVersion: 1, EventID: "usage-ok", Timestamp: now.Add(2 * time.Second), SessionID: "session-retry", SessionSource: "explicit", TurnID: "turn-retry", RequestID: "req-retry", Kind: "usage", Payload: []byte(`{"model":"kimi-k3","provider":"kimi","reasoning_effort":"max","failed":false,"input_tokens":1528,"output_tokens":119,"cached_tokens":39424,"total_tokens":41071}`)},
+		{SchemaVersion: 1, EventID: "done", Timestamp: now.Add(3 * time.Second), SessionID: "session-retry", SessionSource: "explicit", TurnID: "turn-retry", RequestID: "req-retry", Kind: "turn.completed", Payload: []byte(`{"status":200,"failed":false,"incomplete":false}`)},
+	}
+	for _, event := range events {
+		if err := recorder.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitForEvents(t, recorder, "session-retry", len(events))
+	turns, errTurns := recorder.ListTurns(Filter{}, 10, 0)
+	if errTurns != nil || len(turns) != 1 {
+		t.Fatalf("turns = %#v, err = %v", turns, errTurns)
+	}
+	item := turns[0]
+	if item.Failed || item.Failure != "" {
+		t.Fatalf("last successful outcome should clear failed latch: %#v", item)
+	}
+	if item.Status != 200 || item.ReasoningEffort != "max" || item.Provider != "kimi" {
+		t.Fatalf("indexed request = %#v", item)
+	}
+	wantShare := cachedShare(1528, 39424)
+	if item.CachedShare != wantShare || wantShare < 96 {
+		t.Fatalf("cached share = %v, want %v", item.CachedShare, wantShare)
 	}
 	_ = recorder.Close()
 }

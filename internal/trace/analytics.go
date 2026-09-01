@@ -44,6 +44,9 @@ type TurnSummary struct {
 	Failed          bool      `json:"failed"`
 	Incomplete      bool      `json:"incomplete"`
 	TraceAvailable  bool      `json:"trace_available"`
+	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
+	Failure         string    `json:"failure,omitempty"`
+	CachedShare     float64   `json:"cached_share"`
 }
 
 // Breakdown is a token and request aggregate grouped by one dimension.
@@ -99,7 +102,7 @@ func (r *Recorder) ListTurns(filter Filter, limit, offset int) ([]TurnSummary, e
 	limit, offset = normalizePage(limit, offset, 200)
 	args, where := turnFilterSQL(filter)
 	rows, errQuery := r.db.Query(`SELECT t.turn_id,t.session_id,s.session_source,t.request_id,t.trace_id,t.started_at,t.last_at,t.status,t.model,t.provider,t.api_key,
-		t.input_tokens,t.output_tokens,t.reasoning_tokens,t.cached_tokens,t.total_tokens,t.latency_ms,t.ttft_ms,t.failed,t.incomplete
+		t.input_tokens,t.output_tokens,t.reasoning_tokens,t.cached_tokens,t.total_tokens,t.latency_ms,t.ttft_ms,t.failed,t.incomplete,t.reasoning_effort,t.failure
 		FROM turns t JOIN sessions s ON s.session_id=t.session_id `+where+` ORDER BY t.last_at DESC LIMIT ? OFFSET ?`, append(args, limit, offset)...)
 	if errQuery != nil {
 		return nil, errQuery
@@ -232,7 +235,7 @@ func scanTurn(row scanner) (TurnSummary, error) {
 	var failed, incomplete int
 	err := row.Scan(&item.TurnID, &item.SessionID, &item.SessionSource, &item.RequestID, &item.TraceID, &started, &last, &item.Status,
 		&item.Model, &item.Provider, &item.APIKey, &item.InputTokens, &item.OutputTokens, &item.ReasoningTokens, &item.CachedTokens,
-		&item.TotalTokens, &item.LatencyMS, &item.TTFTMS, &failed, &incomplete)
+		&item.TotalTokens, &item.LatencyMS, &item.TTFTMS, &failed, &incomplete, &item.ReasoningEffort, &item.Failure)
 	if err != nil {
 		return TurnSummary{}, err
 	}
@@ -241,7 +244,16 @@ func scanTurn(row scanner) (TurnSummary, error) {
 	item.Failed = failed != 0
 	item.Incomplete = incomplete != 0
 	item.TraceAvailable = item.SessionSource != legacyKeeperSource
+	item.CachedShare = cachedShare(item.InputTokens, item.CachedTokens)
 	return item, nil
+}
+
+func cachedShare(inputTokens, cachedTokens int64) float64 {
+	total := inputTokens + cachedTokens
+	if total <= 0 {
+		return 0
+	}
+	return float64(cachedTokens) / float64(total) * 100
 }
 
 func (r *Recorder) breakdown(filter Filter, where string, args []any, dimension string) ([]Breakdown, error) {

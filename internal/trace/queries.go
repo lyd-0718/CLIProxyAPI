@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -296,15 +297,16 @@ func (r *Recorder) Stats() (map[string]any, error) {
 	writeErrors := r.writeErrors
 	r.errorMu.RUnlock()
 	stats := map[string]any{
-		"enabled":        true,
-		"root_dir":       r.rootDir,
-		"sessions":       sessions,
-		"events":         events,
-		"max_file_bytes": r.maxFileBytes,
-		"retention_days": r.retentionDays,
-		"metadata_days":  r.metadataDays,
-		"max_bytes":      r.maxBytes,
-		"write_errors":   writeErrors,
+		"enabled":          true,
+		"root_dir":         r.rootDir,
+		"sessions":         sessions,
+		"events":           events,
+		"max_file_bytes":   r.maxFileBytes,
+		"retention_days":   r.retentionDays,
+		"metadata_days":    r.metadataDays,
+		"max_bytes":        r.maxBytes,
+		"cleanup_enabled":  r.cleanupEnabled,
+		"write_errors":     writeErrors,
 	}
 	if lastError != "" {
 		stats["last_write_error"] = lastError
@@ -337,6 +339,9 @@ func (r *Recorder) updateTurnFromEvent(tx *sql.Tx, event Event) error {
 		}
 		return 0
 	}
+	failed, hasFailed := payloadBoolPresent(payload, "failed")
+	incomplete, hasIncomplete := payloadBoolPresent(payload, "incomplete")
+	reason := failureFromPayload(payload)
 	_, err := tx.Exec(`UPDATE turns SET model=CASE WHEN ? <> '' THEN ? ELSE model END,
 		provider=CASE WHEN ? <> '' THEN ? ELSE provider END,
 		api_key=CASE WHEN ? <> '' THEN ? ELSE api_key END,
@@ -348,16 +353,142 @@ func (r *Recorder) updateTurnFromEvent(tx *sql.Tx, event Event) error {
 		total_tokens=CASE WHEN ? <> 0 THEN ? ELSE total_tokens END,
 		latency_ms=CASE WHEN ? <> 0 THEN ? ELSE latency_ms END,
 		ttft_ms=CASE WHEN ? <> 0 THEN ? ELSE ttft_ms END,
-		failed=CASE WHEN ? THEN 1 ELSE failed END,
+		reasoning_effort=CASE WHEN ? <> '' THEN ? ELSE reasoning_effort END,
+		failed=CASE WHEN ? THEN ? ELSE failed END,
+		failure=CASE WHEN ? THEN CASE WHEN ? THEN '' WHEN ? <> '' THEN ? ELSE failure END ELSE failure END,
 		incomplete=CASE WHEN ? THEN 1 ELSE incomplete END WHERE turn_id = ?`,
 		getString("model"), getString("model"), getString("provider"), getString("provider"), getString("api_key"), getString("api_key"),
 		getInt("status"), getInt("status"), getInt("input_tokens"), getInt("input_tokens"), getInt("output_tokens"), getInt("output_tokens"),
 		getInt("reasoning_tokens"), getInt("reasoning_tokens"), getInt("cached_tokens"), getInt("cached_tokens"), getInt("total_tokens"), getInt("total_tokens"),
-		getInt("latency_ms"), getInt("latency_ms"), getInt("ttft_ms"), getInt("ttft_ms"), payloadBool(payload, "failed"), payloadBool(payload, "incomplete"), event.TurnID)
+		getInt("latency_ms"), getInt("latency_ms"), getInt("ttft_ms"), getInt("ttft_ms"),
+		getString("reasoning_effort"), getString("reasoning_effort"),
+		boolInt(hasFailed), boolInt(failed),
+		boolInt(hasFailed), boolInt(!failed), reason, reason,
+		hasIncomplete && incomplete, event.TurnID)
 	return err
 }
 
-func payloadBool(payload map[string]any, key string) bool {
-	value, _ := payload[key].(bool)
-	return value
+func payloadBoolPresent(payload map[string]any, key string) (bool, bool) {
+	if payload == nil {
+		return false, false
+	}
+	value, ok := payload[key]
+	if !ok || value == nil {
+		return false, false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	case float64:
+		return typed != 0, true
+	case json.Number:
+		n, err := typed.Int64()
+		return err == nil && n != 0, err == nil
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "true", "1":
+			return true, true
+		case "false", "0":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+func failureFromPayload(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	status := int64(0)
+	body := ""
+	switch raw := payload["failure"].(type) {
+	case map[string]any:
+		status = payloadInt(raw, "status_code")
+		if status == 0 {
+			status = payloadInt(raw, "StatusCode")
+		}
+		body = payloadString(raw, "body")
+		if body == "" {
+			body = payloadString(raw, "Body")
+		}
+	case string:
+		body = raw
+	}
+	message := compactFailureMessage(body)
+	if status > 0 && message != "" {
+		return truncateFailure(fmt.Sprintf("%d %s", status, message))
+	}
+	if message != "" {
+		return truncateFailure(message)
+	}
+	if status > 0 {
+		return fmt.Sprintf("HTTP %d", status)
+	}
+	if code := payloadInt(payload, "status"); code >= 400 {
+		return fmt.Sprintf("HTTP %d", code)
+	}
+	return ""
+}
+
+func payloadString(payload map[string]any, key string) string {
+	if payload == nil {
+		return ""
+	}
+	value, _ := payload[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func payloadInt(payload map[string]any, key string) int64 {
+	if payload == nil {
+		return 0
+	}
+	switch value := payload[key].(type) {
+	case float64:
+		return int64(value)
+	case json.Number:
+		n, _ := value.Int64()
+		return n
+	case int:
+		return int64(value)
+	case int64:
+		return value
+	}
+	return 0
+}
+
+func compactFailureMessage(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return ""
+	}
+	var parsed any
+	if json.Unmarshal([]byte(body), &parsed) == nil {
+		if message := jsonErrorMessage(parsed); message != "" {
+			return message
+		}
+	}
+	return strings.Join(strings.Fields(body), " ")
+}
+
+func jsonErrorMessage(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		if message := payloadString(typed, "message"); message != "" {
+			return message
+		}
+		if nested, ok := typed["error"]; ok {
+			return jsonErrorMessage(nested)
+		}
+	case string:
+		return strings.TrimSpace(typed)
+	}
+	return ""
+}
+
+func truncateFailure(text string) string {
+	runes := []rune(strings.TrimSpace(text))
+	if len(runes) <= 240 {
+		return string(runes)
+	}
+	return string(runes[:240]) + "…"
 }
