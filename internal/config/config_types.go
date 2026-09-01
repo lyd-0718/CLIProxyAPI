@@ -214,6 +214,16 @@ type RemoteManagement struct {
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
 }
 
+// APIKeyProfile holds management metadata for one client API key.
+type APIKeyProfile struct {
+	Name        string `yaml:"name,omitempty" json:"name,omitempty"`
+	Key         string `yaml:"key" json:"key"`
+	Concurrency int    `yaml:"concurrency,omitempty" json:"concurrency,omitempty"`
+	Disabled    bool   `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+	ExpiresAt   string `yaml:"expires-at,omitempty" json:"expires-at,omitempty"`
+	CreatedAt   string `yaml:"created-at,omitempty" json:"created-at,omitempty"`
+}
+
 // TraceConfig controls the built-in session trace recorder.
 type TraceConfig struct {
 	Enabled            bool   `yaml:"enabled" json:"enabled"`

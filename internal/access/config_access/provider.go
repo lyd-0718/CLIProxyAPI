@@ -4,7 +4,9 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/access/clientkeys"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
@@ -16,7 +18,8 @@ func Register(cfg *sdkconfig.SDKConfig) {
 		return
 	}
 
-	keys := normalizeKeys(cfg.APIKeys)
+	keys := activeAPIKeys(cfg)
+	clientkeys.Configure(cfg)
 	if len(keys) == 0 {
 		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
 		return
@@ -26,6 +29,35 @@ func Register(cfg *sdkconfig.SDKConfig) {
 		sdkaccess.AccessProviderTypeConfigAPIKey,
 		newProvider(sdkaccess.DefaultAccessProviderName, keys),
 	)
+}
+
+func activeAPIKeys(cfg *sdkconfig.SDKConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	blocked := map[string]struct{}{}
+	now := time.Now()
+	for _, profile := range cfg.APIKeyProfiles {
+		key := strings.TrimSpace(profile.Key)
+		if key == "" {
+			continue
+		}
+		if profile.Disabled || clientkeys.ProfileExpired(profile.ExpiresAt, now) {
+			blocked[key] = struct{}{}
+		}
+	}
+	keys := normalizeKeys(cfg.APIKeys)
+	if len(blocked) == 0 {
+		return keys
+	}
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if _, skip := blocked[key]; skip {
+			continue
+		}
+		out = append(out, key)
+	}
+	return out
 }
 
 type provider struct {

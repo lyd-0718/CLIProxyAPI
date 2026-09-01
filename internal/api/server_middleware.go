@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/access/clientkeys"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
@@ -171,6 +172,18 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
 				}
+				if !clientkeys.Acquire(result.Principal) {
+					c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": gin.H{
+						"message": "API key concurrency limit reached",
+						"type":    "rate_limit_error",
+						"code":    "concurrency_limit",
+					}})
+					return
+				}
+				defer clientkeys.Release(result.Principal)
+				c.Next()
+				clientkeys.RecordFinish(result.Principal, c.Writer.Status() >= http.StatusBadRequest)
+				return
 			}
 			c.Next()
 			return

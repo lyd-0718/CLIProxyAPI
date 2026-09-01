@@ -41,6 +41,16 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Optional per-key metadata used by the management "API 密钥" page.
+# Authentication still uses api-keys; a matching profile can name a key,
+# cap concurrency (0 = unlimited), disable it, or set an RFC3339 expiry.
+# api-key-profiles:
+#   - name: "studio"
+#     key: "your-api-key-1"
+#     concurrency: 5
+#     disabled: false
+#     expires-at: "2027-01-01T00:00:00Z"
+
 # Enable debug logging
 debug: false
 

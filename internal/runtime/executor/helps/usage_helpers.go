@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/access/clientkeys"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -361,6 +362,9 @@ func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) 
 	record.ResponseHeaders = internallogging.GetResponseHeaders(ctx)
 	trace.RecordUsageForContext(ctx, record)
 	usage.PublishRecord(ctx, record)
+	if key := APIKeyFromContext(ctx); key != "" {
+		clientkeys.AddTokens(key, record.Detail.InputTokens, record.Detail.OutputTokens)
+	}
 }
 
 func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures ...usage.Failure) usage.Record {
